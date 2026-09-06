@@ -3,7 +3,7 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-use ai_vk::write_cleared_image_png_with_validation_layers;
+use ai_vk::ComputeGraph;
 
 #[test]
 fn clears_an_image_on_a_compute_queue_and_writes_a_png() {
@@ -19,11 +19,29 @@ fn clears_an_image_on_a_compute_queue_and_writes_a_png() {
     let height = 5;
     let color = [12, 98, 201, 255];
 
-    write_cleared_image_png_with_validation_layers(width, height, color, &output_path, true)
-        .expect("compute image rendering should succeed");
+    let graph = ComputeGraph::from_toml(&format!(
+        r#"
+            [resources.output]
+            type = "image"
+            extent = [{width}, {height}]
+            output = "{}"
+
+            [[nodes]]
+            name = "fill"
+            shader = "shaders/graph_fill.hlsl"
+            kernel = "main"
+            dispatch = [1, 1, 1]
+            bindings = [{{ resource = "output", access = "write" }}]
+        "#,
+        output_path.display()
+    ))
+    .expect("compute image graph should parse");
+    graph
+        .execute_with_validation_layers(true)
+        .expect("compute image graph should execute");
 
     let rendered = image::open(&output_path)
-        .expect("the compute output should be a valid PNG")
+        .expect("the graph output should be a valid PNG")
         .into_rgba8();
     assert_eq!(rendered.dimensions(), (width, height));
     assert!(rendered.pixels().all(|pixel| pixel.0 == color));

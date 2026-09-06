@@ -3,22 +3,10 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-use ai_vk::write_bindless_image_png_with_validation_layers;
-use hassle_rs::compile_hlsl;
+use ai_vk::ComputeGraph;
 
 #[test]
 fn compute_shader_writes_a_color_through_the_bindless_image_table() {
-    let shader = include_str!("../shaders/solid_color.hlsl");
-    let include_path = format!("-I{}/shaders", env!("CARGO_MANIFEST_DIR"));
-    let spirv = compile_hlsl(
-        "shaders/solid_color.hlsl",
-        shader,
-        "main",
-        "cs_6_0",
-        &["-spirv", &include_path],
-        &[],
-    )
-    .expect("bindless HLSL compute shader should compile");
     let output_path = std::env::temp_dir().join(format!(
         "ai-vk-bindless-image-{}-{}.png",
         std::process::id(),
@@ -31,18 +19,29 @@ fn compute_shader_writes_a_color_through_the_bindless_image_table() {
     let height = 9;
     let color = [12, 98, 201, 255];
 
-    write_bindless_image_png_with_validation_layers(
-        width,
-        height,
-        color,
-        &spirv,
-        &output_path,
-        true,
-    )
-    .expect("bindless compute image rendering should succeed");
+    let graph = ComputeGraph::from_toml(&format!(
+        r#"
+            [resources.output]
+            type = "image"
+            extent = [{width}, {height}]
+            output = "{}"
+
+            [[nodes]]
+            name = "fill"
+            shader = "shaders/solid_color.hlsl"
+            kernel = "main"
+            dispatch = [2, 2, 1]
+            bindings = [{{ resource = "output", access = "write" }}]
+        "#,
+        output_path.display()
+    ))
+    .expect("bindless image graph should parse");
+    graph
+        .execute_with_validation_layers(true)
+        .expect("bindless image graph should execute");
 
     let rendered = image::open(&output_path)
-        .expect("the compute output should be a valid PNG")
+        .expect("the graph output should be a valid PNG")
         .into_rgba8();
     assert_eq!(rendered.dimensions(), (width, height));
     assert!(rendered.pixels().all(|pixel| pixel.0 == color));

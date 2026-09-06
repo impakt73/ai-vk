@@ -1,13 +1,4 @@
-#include "bindless_images.hlsl"
-
-struct PushConstants
-{
-    uint4 target_and_extent;
-    float4 unused_color;
-};
-
-[[vk::push_constant]]
-PushConstants push_constants;
+#include "compute_graph.hlsl"
 
 float sphere_sdf(float3 position, float3 center, float radius)
 {
@@ -82,8 +73,9 @@ float3 phong(float3 position, float3 normal, float3 ray_direction, int material)
 [numthreads(8, 8, 1)]
 void main(uint3 dispatch_thread_id : SV_DispatchThreadID)
 {
-    uint width = push_constants.target_and_extent.y;
-    uint height = push_constants.target_and_extent.z;
+    uint width;
+    uint height;
+    bindless_images[compute_graph.slots[0]].GetDimensions(width, height);
     if (dispatch_thread_id.x >= width || dispatch_thread_id.y >= height)
     {
         return;
@@ -105,5 +97,5 @@ void main(uint3 dispatch_thread_id : SV_DispatchThreadID)
     }
 
     color = pow(saturate(color), 1.0 / 2.2);
-    bindless_images[push_constants.target_and_extent.x][dispatch_thread_id.xy] = float4(color, 1.0);
+    bindless_images[compute_graph.slots[0]][dispatch_thread_id.xy] = float4(color, 1.0);
 }

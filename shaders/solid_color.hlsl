@@ -1,23 +1,16 @@
-#include "bindless_images.hlsl"
-
-struct PushConstants
-{
-    uint4 target_and_extent;
-    float4 color;
-};
-
-[[vk::push_constant]]
-PushConstants push_constants;
+#include "compute_graph.hlsl"
 
 [numthreads(8, 8, 1)]
 void main(uint3 dispatch_thread_id : SV_DispatchThreadID)
 {
-    if (dispatch_thread_id.x >= push_constants.target_and_extent.y ||
-        dispatch_thread_id.y >= push_constants.target_and_extent.z)
+    uint width;
+    uint height;
+    bindless_images[compute_graph.slots[0]].GetDimensions(width, height);
+    if (dispatch_thread_id.x >= width || dispatch_thread_id.y >= height)
     {
         return;
     }
 
-    bindless_images[push_constants.target_and_extent.x][dispatch_thread_id.xy] =
-        push_constants.color;
+    bindless_images[compute_graph.slots[0]][dispatch_thread_id.xy] =
+        float4(12.0 / 255.0, 98.0 / 255.0, 201.0 / 255.0, 1.0);
 }
