@@ -17,14 +17,14 @@ fn raymarches_and_bilinearly_downsamples_three_phong_shaded_spheres() {
 
             [[nodes]]
             name = "raymarch"
-            shader = "shaders/sdf_raymarch.hlsl"
+            shader = "tests/shaders/sdf_raymarch.hlsl"
             kernel = "main"
             dispatch = [6, 4, 1]
             bindings = [{{ resource = "source", access = "write" }}]
 
             [[nodes]]
             name = "downsample"
-            shader = "shaders/sdf_downsample.hlsl"
+            shader = "tests/shaders/sdf_downsample.hlsl"
             kernel = "main"
             dispatch = [3, 2, 1]
             bindings = [

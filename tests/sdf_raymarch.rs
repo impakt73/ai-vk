@@ -13,7 +13,7 @@ fn raymarches_three_phong_shaded_spheres() {
 
             [[nodes]]
             name = "raymarch"
-            shader = "shaders/sdf_raymarch.hlsl"
+            shader = "tests/shaders/sdf_raymarch.hlsl"
             kernel = "main"
             dispatch = [6, 4, 1]
             bindings = [{{ resource = "output", access = "write" }}]

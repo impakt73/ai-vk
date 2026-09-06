@@ -195,7 +195,7 @@ fn uploads_an_input_image_before_graph_execution() {
 
             [[nodes]]
             name = "copy"
-            shader = "shaders/graph_copy.hlsl"
+            shader = "tests/shaders/graph_copy.hlsl"
             kernel = "main"
             dispatch = [1, 1, 1]
             bindings = [
@@ -260,14 +260,14 @@ fn executes_dependent_dispatches_and_retains_bindless_slots() {
 
             [[nodes]]
             name = "fill"
-            shader = "shaders/graph_fill.hlsl"
+            shader = "tests/shaders/graph_fill.hlsl"
             kernel = "main"
             dispatch = [1, 1, 1]
             bindings = [{ resource = "source", access = "write" }]
 
             [[nodes]]
             name = "copy"
-            shader = "shaders/graph_copy.hlsl"
+            shader = "tests/shaders/graph_copy.hlsl"
             kernel = "main"
             dispatch = [1, 1, 1]
             bindings = [
@@ -313,7 +313,7 @@ fn creates_a_persistent_buffer_slot_and_executes_a_buffer_dispatch() {
 
             [[nodes]]
             name = "fill"
-            shader = "shaders/graph_buffer_fill.hlsl"
+            shader = "tests/shaders/graph_buffer_fill.hlsl"
             kernel = "main"
             dispatch = [16, 1, 1]
             bindings = [{{ resource = "output", access = "write" }}]
@@ -359,14 +359,14 @@ fn writes_a_declared_image_output_after_graph_execution() {
 
             [[nodes]]
             name = "fill"
-            shader = "shaders/graph_fill.hlsl"
+            shader = "tests/shaders/graph_fill.hlsl"
             kernel = "main"
             dispatch = [1, 1, 1]
             bindings = [{{ resource = "source", access = "write" }}]
 
             [[nodes]]
             name = "copy"
-            shader = "shaders/graph_copy.hlsl"
+            shader = "tests/shaders/graph_copy.hlsl"
             kernel = "main"
             dispatch = [1, 1, 1]
             bindings = [

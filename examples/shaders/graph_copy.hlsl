@@ -1,4 +1,4 @@
-#include "compute_graph.hlsl"
+#include "../../shaders/compute_graph.hlsl"
 
 [numthreads(8, 8, 1)]
 void main(uint3 dispatch_thread_id : SV_DispatchThreadID)

@@ -1,7 +1,6 @@
 use std::{
     ffi::{CStr, CString},
     ops::Deref,
-    path::Path,
 };
 
 use ash::{Entry, vk};
@@ -192,32 +191,6 @@ pub fn enumerate_physical_devices_with_validation_layers(
         .collect();
 
     Ok(devices)
-}
-
-pub fn write_cleared_image_png(
-    width: u32,
-    height: u32,
-    color: [u8; 4],
-    output_path: impl AsRef<Path>,
-) -> Result<(), Box<dyn std::error::Error>> {
-    write_cleared_image_png_with_validation_layers(width, height, color, output_path, false)
-}
-
-pub fn write_cleared_image_png_with_validation_layers(
-    width: u32,
-    height: u32,
-    color: [u8; 4],
-    output_path: impl AsRef<Path>,
-    enable_validation_layers: bool,
-) -> Result<(), Box<dyn std::error::Error>> {
-    ComputeGraph::write_solid_color_png(
-        width,
-        height,
-        color,
-        output_path,
-        enable_validation_layers,
-    )?;
-    Ok(())
 }
 
 pub(crate) fn select_compute_queue(

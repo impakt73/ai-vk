@@ -1,4 +1,4 @@
-#include "compute_graph.hlsl"
+#include "../../shaders/compute_graph.hlsl"
 
 float sphere_sdf(float3 position, float3 center, float radius)
 {

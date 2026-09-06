@@ -28,7 +28,7 @@ fn clears_an_image_on_a_compute_queue_and_writes_a_png() {
 
             [[nodes]]
             name = "fill"
-            shader = "shaders/graph_fill.hlsl"
+            shader = "tests/shaders/graph_fill.hlsl"
             kernel = "main"
             dispatch = [1, 1, 1]
             bindings = [{{ resource = "output", access = "write" }}]

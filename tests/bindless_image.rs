@@ -28,7 +28,7 @@ fn compute_shader_writes_a_color_through_the_bindless_image_table() {
 
             [[nodes]]
             name = "fill"
-            shader = "shaders/solid_color.hlsl"
+            shader = "tests/shaders/solid_color.hlsl"
             kernel = "main"
             dispatch = [2, 2, 1]
             bindings = [{{ resource = "output", access = "write" }}]

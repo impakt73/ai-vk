@@ -1,5 +1,4 @@
 use std::{
-    borrow::Cow,
     collections::{BTreeMap, BTreeSet},
     ffi::CString,
     fmt, fs,
@@ -130,7 +129,7 @@ impl ImageFormat {
             Self::R32G32B32A32Sfloat => 4,
         };
         let pixel_size = self.pixel_size() as usize;
-        if data.len() % pixel_size != 0 {
+        if !data.len().is_multiple_of(pixel_size) {
             return Err(ComputeGraphError::Invalid(format!(
                 "image data length {} is not aligned to the `{self:?}` pixel size",
                 data.len()
@@ -210,9 +209,6 @@ pub struct ComputeNodeDefinition {
     pub name: String,
     #[serde(alias = "shader_path", alias = "source", alias = "hlsl")]
     pub shader: PathBuf,
-    /// Optional in-memory HLSL source used by built-in graph helpers.
-    #[serde(default)]
-    pub shader_source: Option<String>,
     pub kernel: String,
     #[serde(alias = "dispatch_size")]
     pub dispatch: [u32; 3],
@@ -310,13 +306,6 @@ impl ComputeGraph {
             .unwrap_or_else(|| Path::new("."))
             .to_path_buf();
         Self::from_toml_with_base(&source, base_dir)
-    }
-
-    pub fn from_definition(
-        definition: ComputeGraphDefinition,
-        base_dir: impl Into<PathBuf>,
-    ) -> Result<Self, ComputeGraphError> {
-        Self::from_definition_with_base(definition, base_dir.into())
     }
 
     fn from_toml_with_base(source: &str, base_dir: PathBuf) -> Result<Self, ComputeGraphError> {
@@ -522,66 +511,6 @@ impl ComputeGraph {
         let mut execution = ComputeGraphExecution { runtime };
         execution.write_outputs(self)?;
         Ok(execution)
-    }
-
-    pub fn write_solid_color_png(
-        width: u32,
-        height: u32,
-        color: [u8; 4],
-        output_path: impl AsRef<Path>,
-        enable_validation_layers: bool,
-    ) -> Result<(), ComputeGraphError> {
-        let color = color.map(|channel| f32::from(channel) / 255.0);
-        let source = format!(
-            "#define AI_VK_SOLID_COLOR float4({}, {}, {}, {})\n{}",
-            color[0],
-            color[1],
-            color[2],
-            color[3],
-            include_str!("../shaders/solid_color.hlsl")
-        );
-        let mut resources = BTreeMap::new();
-        resources.insert(
-            "output".into(),
-            ResourceDefinition {
-                kind: ResourceKind::Image,
-                width: Some(width),
-                height: Some(height),
-                extent: None,
-                size: None,
-                input: None,
-                format: None,
-                output: None,
-            },
-        );
-        let graph = Self::from_definition(
-            ComputeGraphDefinition {
-                resources,
-                nodes: vec![ComputeNodeDefinition {
-                    name: "solid-color".into(),
-                    shader: PathBuf::from("solid_color_builtin.hlsl"),
-                    shader_source: Some(source),
-                    kernel: "main".into(),
-                    dispatch: [width.div_ceil(8), height.div_ceil(8), 1],
-                    bindings: vec![ResourceBindingDefinition {
-                        resource: "output".into(),
-                        access: AccessType::Write,
-                    }],
-                }],
-            },
-            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("shaders"),
-        )?;
-        let mut execution = graph.execute_with_validation_layers(enable_validation_layers)?;
-        let (width, height, pixels) = execution.read_image_rgba8("output")?;
-        image::save_buffer_with_format(
-            output_path,
-            &pixels,
-            width,
-            height,
-            image::ColorType::Rgba8,
-            image::ImageFormat::Png,
-        )?;
-        Ok(())
     }
 }
 
@@ -945,10 +874,7 @@ impl GraphRuntime {
         let mut nodes = Vec::with_capacity(graph.definition.nodes.len());
         for node in &graph.definition.nodes {
             let shader_path = graph.base_dir.join(&node.shader);
-            let source = match &node.shader_source {
-                Some(source) => Cow::Borrowed(source.as_str()),
-                None => Cow::Owned(fs::read_to_string(&shader_path)?),
-            };
+            let source = fs::read_to_string(&shader_path)?;
             let spirv = compile_hlsl(
                 &shader_path.to_string_lossy(),
                 &source,
