@@ -5,6 +5,13 @@ use std::{
 
 use ash::{Entry, vk};
 
+mod compute_graph;
+
+pub use compute_graph::{
+    AccessType, ComputeGraph, ComputeGraphDefinition, ComputeGraphError, ComputeGraphExecution,
+    ComputeNodeDefinition, ResourceBindingDefinition, ResourceDefinition, ResourceKind,
+};
+
 #[derive(Debug)]
 pub struct PhysicalDeviceInfo {
     pub name: String,
