@@ -5,3 +5,5 @@ edition = "2024"
 
 [dependencies]
 ash = "0.38.0"
+clap = { version = "4.5.48", features = ["derive"] }
+image = { version = "0.25.8", default-features = false, features = ["png"] }
