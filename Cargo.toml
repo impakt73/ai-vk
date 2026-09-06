@@ -7,3 +7,6 @@ edition = "2024"
 ash = "0.38.0"
 clap = { version = "4.5.48", features = ["derive"] }
 image = { version = "0.25.8", default-features = false, features = ["png"] }
+
+[dev-dependencies]
+hassle-rs = "0.12.0"
