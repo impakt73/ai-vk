@@ -56,6 +56,26 @@ size = 1024
 output = "result.bin"
 ```
 
+Resources can also declare an input path. Input paths are relative to the graph
+TOML file. Buffer inputs are copied as raw bytes and their size is taken from
+the file. Image inputs have their dimensions taken from the image file, must
+declare a GPU `format`, and are converted to that format before being uploaded:
+
+```toml
+[resources.image]
+type = "image"
+input = "source.png"
+format = "rgba8_unorm"
+
+[resources.data]
+type = "buffer"
+input = "source.bin"
+```
+
+Do not specify `width`, `height`, `extent`, or `size` for resources with an
+input. Those values are derived from the input file and explicit values are
+rejected.
+
 ```toml
 [resources.source]
 type = "image"

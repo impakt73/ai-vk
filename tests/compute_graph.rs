@@ -102,6 +102,149 @@ fn rejects_unknown_resources_and_invalid_dimensions() {
 }
 
 #[test]
+fn derives_input_resource_dimensions_and_sizes() {
+    let image_path = temporary_output("png");
+    let buffer_path = temporary_output("bin");
+    image::RgbaImage::from_pixel(3, 2, image::Rgba([10, 20, 30, 255]))
+        .save(&image_path)
+        .expect("input image should be writable");
+    fs::write(&buffer_path, [1_u8, 2, 3, 4, 5]).expect("input buffer should be writable");
+
+    let graph = ComputeGraph::from_toml(&format!(
+        r#"
+            [resources.image]
+            type = "image"
+            input = "{}"
+            format = "rgba8"
+
+            [resources.buffer]
+            type = "buffer"
+            input = "{}"
+        "#,
+        image_path.display(),
+        buffer_path.display()
+    ))
+    .expect("input resources should parse");
+
+    assert_eq!(
+        graph.definition().resources["image"].input,
+        Some(image_path.clone())
+    );
+    assert_eq!(
+        graph.definition().resources["buffer"].input,
+        Some(buffer_path.clone())
+    );
+    fs::remove_file(image_path).expect("input image should be removable");
+    fs::remove_file(buffer_path).expect("input buffer should be removable");
+}
+
+#[test]
+fn rejects_explicit_dimensions_and_missing_image_format_for_inputs() {
+    let image_path = temporary_output("png");
+    image::RgbaImage::from_pixel(2, 2, image::Rgba([0, 0, 0, 255]))
+        .save(&image_path)
+        .expect("input image should be writable");
+
+    let explicit_dimensions = ComputeGraph::from_toml(&format!(
+        r#"
+            [resources.image]
+            type = "image"
+            input = "{}"
+            format = "rgba8"
+            extent = [2, 2]
+        "#,
+        image_path.display()
+    ))
+    .expect_err("input image dimensions should be derived");
+    assert!(
+        explicit_dimensions
+            .to_string()
+            .contains("must not specify dimensions")
+    );
+
+    let missing_format = ComputeGraph::from_toml(&format!(
+        r#"
+            [resources.image]
+            type = "image"
+            input = "{}"
+        "#,
+        image_path.display()
+    ))
+    .expect_err("input image format should be explicit");
+    assert!(missing_format.to_string().contains("must specify a format"));
+    fs::remove_file(image_path).expect("input image should be removable");
+}
+
+#[test]
+fn uploads_an_input_image_before_graph_execution() {
+    let input_path = temporary_output("png");
+    image::RgbaImage::from_fn(8, 8, |x, y| image::Rgba([x as u8, y as u8, 33, 255]))
+        .save(&input_path)
+        .expect("input image should be writable");
+
+    let graph = ComputeGraph::from_toml(&format!(
+        r#"
+            [resources.source]
+            type = "image"
+            input = "{}"
+            format = "rgba8"
+
+            [resources.output]
+            type = "image"
+            extent = [8, 8]
+
+            [[nodes]]
+            name = "copy"
+            shader = "shaders/graph_copy.hlsl"
+            kernel = "main"
+            dispatch = [1, 1, 1]
+            bindings = [
+                {{ resource = "source", access = "read" }},
+                {{ resource = "output", access = "write" }},
+            ]
+        "#,
+        input_path.display()
+    ))
+    .expect("input graph should parse");
+    let mut execution = graph
+        .execute_with_validation_layers(true)
+        .expect("input graph should execute");
+    let (width, height, pixels) = execution
+        .read_image_rgba8("output")
+        .expect("output image should be readable");
+    assert_eq!((width, height), (8, 8));
+    assert_eq!(&pixels[..4], &[0, 0, 33, 255]);
+    assert_eq!(&pixels[(7 * 8 + 3) * 4..(7 * 8 + 4) * 4], &[3, 7, 33, 255]);
+    fs::remove_file(input_path).expect("input image should be removable");
+}
+
+#[test]
+fn uploads_an_input_buffer_before_graph_execution() {
+    let input_path = temporary_output("bin");
+    let expected = vec![0, 1, 2, 3, 4, 5, 6, 7];
+    fs::write(&input_path, &expected).expect("input buffer should be writable");
+    let graph = ComputeGraph::from_toml(&format!(
+        r#"
+            [resources.input]
+            type = "buffer"
+            input = "{}"
+        "#,
+        input_path.display()
+    ))
+    .expect("input buffer graph should parse");
+    let mut execution = graph
+        .execute_with_validation_layers(true)
+        .expect("input buffer graph should execute");
+    assert_eq!(
+        execution
+            .read_buffer("input")
+            .expect("buffer should be readable"),
+        expected
+    );
+    fs::remove_file(input_path).expect("input buffer should be removable");
+}
+
+#[test]
 fn executes_dependent_dispatches_and_retains_bindless_slots() {
     let graph = ComputeGraph::from_toml(
         r#"

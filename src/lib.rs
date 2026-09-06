@@ -132,7 +132,8 @@ unsafe extern "system" fn vulkan_debug_callback(
 
 pub use compute_graph::{
     AccessType, ComputeGraph, ComputeGraphDefinition, ComputeGraphError, ComputeGraphExecution,
-    ComputeNodeDefinition, ResourceBindingDefinition, ResourceDefinition, ResourceKind,
+    ComputeNodeDefinition, ImageFormat, ResourceBindingDefinition, ResourceDefinition,
+    ResourceKind,
 };
 
 #[derive(Debug)]

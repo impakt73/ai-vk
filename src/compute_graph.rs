@@ -47,6 +47,130 @@ pub enum ResourceKind {
     Buffer,
 }
 
+/// Vulkan image formats supported by graph image inputs and outputs.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum ImageFormat {
+    #[serde(alias = "r8")]
+    R8Unorm,
+    #[serde(alias = "rg8", alias = "r8g8_unorm")]
+    R8G8Unorm,
+    #[serde(alias = "rgba8", alias = "rgba8_unorm", alias = "r8g8b8a8_unorm")]
+    R8G8B8A8Unorm,
+    #[serde(alias = "bgra8", alias = "bgra8_unorm", alias = "b8g8r8a8_unorm")]
+    B8G8R8A8Unorm,
+    #[serde(alias = "r32_float")]
+    R32Sfloat,
+    #[serde(alias = "rg32_float", alias = "r32g32_sfloat")]
+    R32G32Sfloat,
+    #[serde(alias = "rgba32_float", alias = "r32g32b32a32_sfloat")]
+    R32G32B32A32Sfloat,
+}
+
+impl ImageFormat {
+    fn vk_format(self) -> vk::Format {
+        match self {
+            Self::R8Unorm => vk::Format::R8_UNORM,
+            Self::R8G8Unorm => vk::Format::R8G8_UNORM,
+            Self::R8G8B8A8Unorm => vk::Format::R8G8B8A8_UNORM,
+            Self::B8G8R8A8Unorm => vk::Format::B8G8R8A8_UNORM,
+            Self::R32Sfloat => vk::Format::R32_SFLOAT,
+            Self::R32G32Sfloat => vk::Format::R32G32_SFLOAT,
+            Self::R32G32B32A32Sfloat => vk::Format::R32G32B32A32_SFLOAT,
+        }
+    }
+
+    fn pixel_size(self) -> u64 {
+        match self {
+            Self::R8Unorm => 1,
+            Self::R8G8Unorm => 2,
+            Self::R8G8B8A8Unorm | Self::B8G8R8A8Unorm => 4,
+            Self::R32Sfloat => 4,
+            Self::R32G32Sfloat => 8,
+            Self::R32G32B32A32Sfloat => 16,
+        }
+    }
+
+    fn input_pixels(self, image: &image::DynamicImage) -> Vec<u8> {
+        let rgba = image.to_rgba8();
+        let mut pixels = Vec::with_capacity(
+            rgba.width() as usize * rgba.height() as usize * self.pixel_size() as usize,
+        );
+        for pixel in rgba.pixels() {
+            let [red, green, blue, alpha] = pixel.0;
+            match self {
+                Self::R8Unorm => pixels.push(red),
+                Self::R8G8Unorm => pixels.extend_from_slice(&[red, green]),
+                Self::R8G8B8A8Unorm => pixels.extend_from_slice(&[red, green, blue, alpha]),
+                Self::B8G8R8A8Unorm => pixels.extend_from_slice(&[blue, green, red, alpha]),
+                Self::R32Sfloat => {
+                    pixels.extend_from_slice(&(f32::from(red) / 255.0).to_le_bytes())
+                }
+                Self::R32G32Sfloat => {
+                    pixels.extend_from_slice(&(f32::from(red) / 255.0).to_le_bytes());
+                    pixels.extend_from_slice(&(f32::from(green) / 255.0).to_le_bytes());
+                }
+                Self::R32G32B32A32Sfloat => {
+                    for channel in [red, green, blue, alpha] {
+                        pixels.extend_from_slice(&(f32::from(channel) / 255.0).to_le_bytes());
+                    }
+                }
+            }
+        }
+        pixels
+    }
+
+    fn output_rgba8(self, data: &[u8]) -> Result<Vec<u8>, ComputeGraphError> {
+        let channels = match self {
+            Self::R8Unorm => 1,
+            Self::R8G8Unorm => 2,
+            Self::R8G8B8A8Unorm | Self::B8G8R8A8Unorm => 4,
+            Self::R32Sfloat => 1,
+            Self::R32G32Sfloat => 2,
+            Self::R32G32B32A32Sfloat => 4,
+        };
+        let pixel_size = self.pixel_size() as usize;
+        if data.len() % pixel_size != 0 {
+            return Err(ComputeGraphError::Invalid(format!(
+                "image data length {} is not aligned to the `{self:?}` pixel size",
+                data.len()
+            )));
+        }
+        let mut pixels = Vec::with_capacity(data.len() / pixel_size * 4);
+        for raw in data.chunks_exact(pixel_size) {
+            let mut rgba = [0, 0, 0, 255];
+            if channels <= 2 {
+                rgba[0] = image_channel(raw, self, 0);
+                rgba[1] = if channels == 2 {
+                    image_channel(raw, self, 1)
+                } else {
+                    0
+                };
+            } else {
+                rgba[0] = image_channel(raw, self, 0);
+                rgba[1] = image_channel(raw, self, 1);
+                rgba[2] = image_channel(raw, self, 2);
+                rgba[3] = image_channel(raw, self, 3);
+            }
+            pixels.extend_from_slice(&rgba);
+        }
+        Ok(pixels)
+    }
+}
+
+fn image_channel(data: &[u8], format: ImageFormat, channel: usize) -> u8 {
+    match format {
+        ImageFormat::R8Unorm | ImageFormat::R8G8Unorm => data[channel],
+        ImageFormat::R8G8B8A8Unorm => data[channel],
+        ImageFormat::B8G8R8A8Unorm => data[[2, 1, 0, 3][channel]],
+        ImageFormat::R32Sfloat | ImageFormat::R32G32Sfloat | ImageFormat::R32G32B32A32Sfloat => {
+            let start = channel * 4;
+            (f32::from_le_bytes(data[start..start + 4].try_into().unwrap()) * 255.0)
+                .clamp(0.0, 255.0) as u8
+        }
+    }
+}
+
 /// A resource declared in the `[resources.<name>]` TOML tables.
 #[derive(Clone, Debug, Deserialize)]
 pub struct ResourceDefinition {
@@ -60,6 +184,12 @@ pub struct ResourceDefinition {
     pub extent: Option<[u32; 2]>,
     #[serde(default)]
     pub size: Option<u64>,
+    /// Optional input path, resolved relative to the graph TOML file.
+    #[serde(default)]
+    pub input: Option<PathBuf>,
+    /// GPU image format. Defaults to `r8g8b8a8_unorm` when no input is used.
+    #[serde(default)]
+    pub format: Option<ImageFormat>,
     /// Optional output path, resolved relative to the graph TOML file.
     #[serde(default)]
     pub output: Option<PathBuf>,
@@ -114,7 +244,7 @@ impl fmt::Display for ComputeGraphError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Io(error) => write!(formatter, "I/O error: {error}"),
-            Self::Image(error) => write!(formatter, "image output error: {error}"),
+            Self::Image(error) => write!(formatter, "image error: {error}"),
             Self::Parse(error) => write!(formatter, "TOML error: {error}"),
             Self::Invalid(error) => formatter.write_str(error),
             Self::Vulkan(error) => write!(formatter, "Vulkan error: {error:?}"),
@@ -211,13 +341,42 @@ impl ComputeGraph {
         for (name, resource) in &definition.resources {
             match resource.kind {
                 ResourceKind::Image => {
+                    if resource.input.is_some()
+                        && (resource.width.is_some()
+                            || resource.height.is_some()
+                            || resource.extent.is_some())
+                    {
+                        return Err(ComputeGraphError::Invalid(format!(
+                            "image resource `{name}` must not specify dimensions when input is used"
+                        )));
+                    }
+                    let input_dimensions = if let Some(input) = &resource.input {
+                        if resource.format.is_none() {
+                            return Err(ComputeGraphError::Invalid(format!(
+                                "image resource `{name}` must specify a format when input is used"
+                            )));
+                        }
+                        let input_path = base_dir.join(input);
+                        let input_image = image::open(&input_path)?;
+                        if input_image.width() == 0 || input_image.height() == 0 {
+                            return Err(ComputeGraphError::Invalid(format!(
+                                "image resource `{name}` input `{}` has zero dimensions",
+                                input_path.display()
+                            )));
+                        }
+                        Some((input_image.width(), input_image.height()))
+                    } else {
+                        None
+                    };
                     let width = resource
                         .width
                         .or(resource.extent.map(|extent| extent[0]))
+                        .or(input_dimensions.map(|dimensions| dimensions.0))
                         .unwrap_or(0);
                     let height = resource
                         .height
                         .or(resource.extent.map(|extent| extent[1]))
+                        .or(input_dimensions.map(|dimensions| dimensions.1))
                         .unwrap_or(0);
                     if width == 0 || height == 0 {
                         return Err(ComputeGraphError::Invalid(format!(
@@ -239,7 +398,16 @@ impl ComputeGraph {
                     }
                 }
                 ResourceKind::Buffer => {
-                    if resource.size.unwrap_or(0) == 0 {
+                    if resource.input.is_some() && resource.size.is_some() {
+                        return Err(ComputeGraphError::Invalid(format!(
+                            "buffer resource `{name}` must not specify size when input is used"
+                        )));
+                    }
+                    let size = match &resource.input {
+                        Some(input) => fs::metadata(base_dir.join(input))?.len(),
+                        None => resource.size.unwrap_or(0),
+                    };
+                    if size == 0 {
                         return Err(ComputeGraphError::Invalid(format!(
                             "buffer resource `{name}` must have a non-zero size"
                         )));
@@ -381,6 +549,8 @@ impl ComputeGraph {
                 height: Some(height),
                 extent: None,
                 size: None,
+                input: None,
+                format: None,
                 output: None,
             },
         );
@@ -484,6 +654,7 @@ struct GraphImage {
     memory: vk::DeviceMemory,
     width: u32,
     height: u32,
+    format: ImageFormat,
     layout: vk::ImageLayout,
     access: vk::AccessFlags,
 }
@@ -672,15 +843,11 @@ impl GraphRuntime {
             let slot = graph.slots[name];
             let resource = match definition.kind {
                 ResourceKind::Image => {
-                    let extent = definition.extent.unwrap_or([
-                        definition.width.unwrap_or(0),
-                        definition.height.unwrap_or(0),
-                    ]);
-                    let width = definition.width.unwrap_or(extent[0]);
-                    let height = definition.height.unwrap_or(extent[1]);
+                    let (width, height) = image_dimensions(graph, name, definition)?;
+                    let format = definition.format.unwrap_or(ImageFormat::R8G8B8A8Unorm);
                     let image_info = vk::ImageCreateInfo::default()
                         .image_type(vk::ImageType::TYPE_2D)
-                        .format(vk::Format::R8G8B8A8_UNORM)
+                        .format(format.vk_format())
                         .extent(vk::Extent3D {
                             width,
                             height,
@@ -703,7 +870,7 @@ impl GraphRuntime {
                     let view_info = vk::ImageViewCreateInfo::default()
                         .image(image)
                         .view_type(vk::ImageViewType::TYPE_2D)
-                        .format(vk::Format::R8G8B8A8_UNORM)
+                        .format(format.vk_format())
                         .subresource_range(color_subresource_range());
                     let view = unsafe { device.create_image_view(&view_info, None)? };
                     add_graph_image(&device, &bindless, slot, view)?;
@@ -713,12 +880,13 @@ impl GraphRuntime {
                         memory,
                         width,
                         height,
+                        format,
                         layout: vk::ImageLayout::UNDEFINED,
                         access: vk::AccessFlags::empty(),
                     })
                 }
                 ResourceKind::Buffer => {
-                    let size = definition.size.expect("validated buffer size");
+                    let size = buffer_size(graph, definition)?;
                     let buffer_info = vk::BufferCreateInfo::default()
                         .size(size)
                         .usage(
@@ -837,7 +1005,7 @@ impl GraphRuntime {
             .flags(vk::CommandPoolCreateFlags::TRANSIENT)
             .queue_family_index(queue_family_index);
         let command_pool = unsafe { device.create_command_pool(&command_pool_info, None)? };
-        Ok(Self {
+        let mut runtime = Self {
             instance,
             device,
             physical_device,
@@ -848,7 +1016,182 @@ impl GraphRuntime {
             nodes,
             pipeline_layout,
             command_pool,
-        })
+        };
+        runtime.upload_inputs(graph)?;
+        Ok(runtime)
+    }
+
+    fn upload_inputs(&mut self, graph: &ComputeGraph) -> Result<(), ComputeGraphError> {
+        if !graph
+            .definition
+            .resources
+            .values()
+            .any(|resource| resource.input.is_some())
+        {
+            return Ok(());
+        }
+
+        let allocate_info = vk::CommandBufferAllocateInfo::default()
+            .command_pool(self.command_pool)
+            .level(vk::CommandBufferLevel::PRIMARY)
+            .command_buffer_count(1);
+        let command = unsafe { self.device.allocate_command_buffers(&allocate_info)?[0] };
+        unsafe {
+            self.device
+                .begin_command_buffer(command, &vk::CommandBufferBeginInfo::default())?;
+        }
+        let properties = unsafe {
+            self.instance
+                .get_physical_device_memory_properties(self.physical_device)
+        };
+        let mut staging = Vec::new();
+        for (name, definition) in &graph.definition.resources {
+            let Some(input) = &definition.input else {
+                continue;
+            };
+            let input_path = graph.base_dir.join(input);
+            let bytes = match definition.kind {
+                ResourceKind::Image => {
+                    let image = image::open(&input_path)?;
+                    let format = definition.format.ok_or_else(|| {
+                        ComputeGraphError::Invalid(format!(
+                            "image resource `{name}` must specify a format when input is used"
+                        ))
+                    })?;
+                    format.input_pixels(&image)
+                }
+                ResourceKind::Buffer => fs::read(&input_path)?,
+            };
+            let size = u64::try_from(bytes.len()).map_err(|_| {
+                ComputeGraphError::Invalid(format!("input `{}` is too large", input_path.display()))
+            })?;
+            let buffer_info = vk::BufferCreateInfo::default()
+                .size(size)
+                .usage(vk::BufferUsageFlags::TRANSFER_SRC)
+                .sharing_mode(vk::SharingMode::EXCLUSIVE);
+            let buffer = unsafe { self.device.create_buffer(&buffer_info, None)? };
+            let requirements = unsafe { self.device.get_buffer_memory_requirements(buffer) };
+            let (memory_type, flags) = find_memory_type(
+                &properties,
+                requirements.memory_type_bits,
+                vk::MemoryPropertyFlags::HOST_VISIBLE,
+                vk::MemoryPropertyFlags::HOST_COHERENT,
+            )
+            .map_err(|error| ComputeGraphError::Invalid(error.to_string()))?;
+            let allocate = vk::MemoryAllocateInfo::default()
+                .allocation_size(requirements.size)
+                .memory_type_index(memory_type);
+            let memory = unsafe { self.device.allocate_memory(&allocate, None)? };
+            unsafe { self.device.bind_buffer_memory(buffer, memory, 0)? };
+            let mapped = unsafe {
+                self.device
+                    .map_memory(memory, 0, size, vk::MemoryMapFlags::empty())?
+            };
+            unsafe {
+                std::ptr::copy_nonoverlapping(bytes.as_ptr(), mapped.cast::<u8>(), bytes.len());
+            }
+            if !flags.contains(vk::MemoryPropertyFlags::HOST_COHERENT) {
+                let range = vk::MappedMemoryRange::default()
+                    .memory(memory)
+                    .offset(0)
+                    .size(size);
+                unsafe {
+                    self.device
+                        .flush_mapped_memory_ranges(std::slice::from_ref(&range))?;
+                }
+            }
+            unsafe { self.device.unmap_memory(memory) };
+
+            let runtime_resource = self.resources.get_mut(name).ok_or_else(|| {
+                ComputeGraphError::Invalid(format!("missing runtime resource `{name}`"))
+            })?;
+            match &mut runtime_resource.resource {
+                GraphResource::Image(image) => {
+                    let barrier = vk::ImageMemoryBarrier::default()
+                        .src_access_mask(vk::AccessFlags::empty())
+                        .dst_access_mask(vk::AccessFlags::TRANSFER_WRITE)
+                        .old_layout(vk::ImageLayout::UNDEFINED)
+                        .new_layout(vk::ImageLayout::TRANSFER_DST_OPTIMAL)
+                        .image(image.image)
+                        .subresource_range(color_subresource_range());
+                    let region = vk::BufferImageCopy::default()
+                        .image_subresource(
+                            vk::ImageSubresourceLayers::default()
+                                .aspect_mask(vk::ImageAspectFlags::COLOR)
+                                .mip_level(0)
+                                .base_array_layer(0)
+                                .layer_count(1),
+                        )
+                        .image_extent(vk::Extent3D {
+                            width: image.width,
+                            height: image.height,
+                            depth: 1,
+                        });
+                    unsafe {
+                        self.device.cmd_pipeline_barrier(
+                            command,
+                            vk::PipelineStageFlags::TOP_OF_PIPE,
+                            vk::PipelineStageFlags::TRANSFER,
+                            vk::DependencyFlags::empty(),
+                            &[],
+                            &[],
+                            std::slice::from_ref(&barrier),
+                        );
+                        self.device.cmd_copy_buffer_to_image(
+                            command,
+                            buffer,
+                            image.image,
+                            vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+                            std::slice::from_ref(&region),
+                        );
+                    }
+                    image.layout = vk::ImageLayout::TRANSFER_DST_OPTIMAL;
+                    image.access = vk::AccessFlags::TRANSFER_WRITE;
+                }
+                GraphResource::Buffer(graph_buffer) => {
+                    let barrier = vk::BufferMemoryBarrier::default()
+                        .src_access_mask(vk::AccessFlags::empty())
+                        .dst_access_mask(vk::AccessFlags::TRANSFER_WRITE)
+                        .buffer(graph_buffer.buffer)
+                        .offset(0)
+                        .size(graph_buffer.size);
+                    unsafe {
+                        self.device.cmd_pipeline_barrier(
+                            command,
+                            vk::PipelineStageFlags::TOP_OF_PIPE,
+                            vk::PipelineStageFlags::TRANSFER,
+                            vk::DependencyFlags::empty(),
+                            &[],
+                            std::slice::from_ref(&barrier),
+                            &[],
+                        );
+                        self.device.cmd_copy_buffer(
+                            command,
+                            buffer,
+                            graph_buffer.buffer,
+                            std::slice::from_ref(&vk::BufferCopy::default().size(size)),
+                        );
+                    }
+                    graph_buffer.access = vk::AccessFlags::TRANSFER_WRITE;
+                }
+            }
+            staging.push((buffer, memory));
+        }
+        unsafe {
+            self.device.end_command_buffer(command)?;
+            let submit = vk::SubmitInfo::default().command_buffers(std::slice::from_ref(&command));
+            self.device.queue_submit(
+                self.queue,
+                std::slice::from_ref(&submit),
+                vk::Fence::null(),
+            )?;
+            self.device.queue_wait_idle(self.queue)?;
+            for (buffer, memory) in staging {
+                self.device.destroy_buffer(buffer, None);
+                self.device.free_memory(memory, None);
+            }
+        }
+        Ok(())
     }
 
     fn execute(&mut self, graph: &ComputeGraph) -> Result<(), ComputeGraphError> {
@@ -960,7 +1303,7 @@ impl GraphRuntime {
                         vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL
                     };
                     let needs_barrier = image.layout != new_layout
-                        || image.access.contains(vk::AccessFlags::SHADER_WRITE)
+                        || !image.access.is_empty()
                         || binding.access.writes();
                     if needs_barrier {
                         image_barriers.push(
@@ -977,8 +1320,7 @@ impl GraphRuntime {
                     image.access = access_flags(binding.access);
                 }
                 GraphResource::Buffer(buffer) => {
-                    let needs_barrier = buffer.access.contains(vk::AccessFlags::SHADER_WRITE)
-                        || binding.access.writes();
+                    let needs_barrier = !buffer.access.is_empty() || binding.access.writes();
                     if needs_barrier {
                         buffer_barriers.push(
                             vk::BufferMemoryBarrier::default()
@@ -994,10 +1336,30 @@ impl GraphRuntime {
             }
         }
         if !image_barriers.is_empty() || !buffer_barriers.is_empty() {
+            let mut source_stage = vk::PipelineStageFlags::empty();
+            for access in image_barriers
+                .iter()
+                .map(|barrier| barrier.src_access_mask)
+                .chain(
+                    buffer_barriers
+                        .iter()
+                        .map(|barrier| barrier.src_access_mask),
+                )
+            {
+                if access
+                    .intersects(vk::AccessFlags::TRANSFER_WRITE | vk::AccessFlags::TRANSFER_READ)
+                {
+                    source_stage |= vk::PipelineStageFlags::TRANSFER;
+                } else if !access.is_empty() {
+                    source_stage |= vk::PipelineStageFlags::COMPUTE_SHADER;
+                } else {
+                    source_stage |= vk::PipelineStageFlags::TOP_OF_PIPE;
+                }
+            }
             unsafe {
                 self.device.cmd_pipeline_barrier(
                     command_buffer,
-                    vk::PipelineStageFlags::COMPUTE_SHADER,
+                    source_stage,
                     vk::PipelineStageFlags::COMPUTE_SHADER,
                     vk::DependencyFlags::empty(),
                     &[],
@@ -1018,9 +1380,14 @@ impl GraphRuntime {
                 "resource `{name}` is not an image"
             )));
         };
-        let byte_count = u64::from(image.width) * u64::from(image.height) * 4;
+        let raw_byte_count = u64::from(image.width)
+            .checked_mul(u64::from(image.height))
+            .and_then(|pixels| pixels.checked_mul(image.format.pixel_size()))
+            .ok_or_else(|| {
+                ComputeGraphError::Invalid("image staging buffer is too large".into())
+            })?;
         let buffer_info = vk::BufferCreateInfo::default()
-            .size(byte_count)
+            .size(raw_byte_count)
             .usage(vk::BufferUsageFlags::TRANSFER_DST)
             .sharing_mode(vk::SharingMode::EXCLUSIVE);
         let staging = unsafe { self.device.create_buffer(&buffer_info, None)? };
@@ -1060,7 +1427,16 @@ impl GraphRuntime {
                 .subresource_range(color_subresource_range());
             self.device.cmd_pipeline_barrier(
                 command,
-                vk::PipelineStageFlags::COMPUTE_SHADER,
+                if image
+                    .access
+                    .intersects(vk::AccessFlags::TRANSFER_READ | vk::AccessFlags::TRANSFER_WRITE)
+                {
+                    vk::PipelineStageFlags::TRANSFER
+                } else if image.access.is_empty() {
+                    vk::PipelineStageFlags::TOP_OF_PIPE
+                } else {
+                    vk::PipelineStageFlags::COMPUTE_SHADER
+                },
                 vk::PipelineStageFlags::TRANSFER,
                 vk::DependencyFlags::empty(),
                 &[],
@@ -1100,27 +1476,28 @@ impl GraphRuntime {
         image.access = vk::AccessFlags::TRANSFER_READ;
         let mapped = unsafe {
             self.device
-                .map_memory(memory, 0, byte_count, vk::MemoryMapFlags::empty())?
+                .map_memory(memory, 0, raw_byte_count, vk::MemoryMapFlags::empty())?
         };
         if !flags.contains(vk::MemoryPropertyFlags::HOST_COHERENT) {
             let range = vk::MappedMemoryRange::default()
                 .memory(memory)
                 .offset(0)
-                .size(byte_count);
+                .size(raw_byte_count);
             unsafe {
                 self.device
                     .invalidate_mapped_memory_ranges(std::slice::from_ref(&range))?
             };
         }
         let bytes = unsafe {
-            std::slice::from_raw_parts(mapped.cast::<u8>(), byte_count as usize).to_vec()
+            std::slice::from_raw_parts(mapped.cast::<u8>(), raw_byte_count as usize).to_vec()
         };
         unsafe {
             self.device.unmap_memory(memory);
             self.device.destroy_buffer(staging, None);
             self.device.free_memory(memory, None);
         }
-        Ok((image.width, image.height, bytes))
+        let pixels = image.format.output_rgba8(&bytes)?;
+        Ok((image.width, image.height, pixels))
     }
 
     fn read_buffer(&mut self, name: &str) -> Result<Vec<u8>, ComputeGraphError> {
@@ -1172,8 +1549,13 @@ impl GraphRuntime {
                 .buffer(buffer.buffer)
                 .offset(0)
                 .size(buffer.size);
-            let source_stage = if buffer.access.contains(vk::AccessFlags::TRANSFER_READ) {
+            let source_stage = if buffer
+                .access
+                .intersects(vk::AccessFlags::TRANSFER_READ | vk::AccessFlags::TRANSFER_WRITE)
+            {
                 vk::PipelineStageFlags::TRANSFER
+            } else if buffer.access.is_empty() {
+                vk::PipelineStageFlags::TOP_OF_PIPE
             } else {
                 vk::PipelineStageFlags::COMPUTE_SHADER
             };
@@ -1272,6 +1654,41 @@ fn access_flags(access: AccessType) -> vk::AccessFlags {
         (false, true) => vk::AccessFlags::SHADER_WRITE,
         (true, true) => vk::AccessFlags::SHADER_READ | vk::AccessFlags::SHADER_WRITE,
         (false, false) => vk::AccessFlags::empty(),
+    }
+}
+
+fn image_dimensions(
+    graph: &ComputeGraph,
+    name: &str,
+    definition: &ResourceDefinition,
+) -> Result<(u32, u32), ComputeGraphError> {
+    if let Some(input) = &definition.input {
+        let image = image::open(graph.base_dir.join(input))?;
+        return Ok((image.width(), image.height()));
+    }
+    let extent = definition.extent.unwrap_or([
+        definition.width.unwrap_or(0),
+        definition.height.unwrap_or(0),
+    ]);
+    let width = definition.width.unwrap_or(extent[0]);
+    let height = definition.height.unwrap_or(extent[1]);
+    if width == 0 || height == 0 {
+        return Err(ComputeGraphError::Invalid(format!(
+            "image resource `{name}` must have non-zero width and height"
+        )));
+    }
+    Ok((width, height))
+}
+
+fn buffer_size(
+    graph: &ComputeGraph,
+    definition: &ResourceDefinition,
+) -> Result<u64, ComputeGraphError> {
+    match &definition.input {
+        Some(input) => Ok(fs::metadata(graph.base_dir.join(input))?.len()),
+        None => definition.size.ok_or_else(|| {
+            ComputeGraphError::Invalid("buffer resource is missing its size".into())
+        }),
     }
 }
 
