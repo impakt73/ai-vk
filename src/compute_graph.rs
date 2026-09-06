@@ -14,7 +14,7 @@ use crate::{
 };
 
 const MAX_RESOURCES: usize = 64;
-const RESOURCE_TABLE_CAPACITY: usize = 30;
+const RESOURCE_TABLE_CAPACITY: usize = 16;
 
 /// How a dispatch uses a graph resource.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq)]

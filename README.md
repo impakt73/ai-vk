@@ -94,6 +94,6 @@ bindings = [{ resource = "source", access = "write" }]
 ```
 
 Graph shaders should include `shaders/compute_graph.hlsl`. Each dispatch gets a
-120-byte push-constant table containing `compute_graph.slots[]`. A slot indexes
+64-byte push-constant table containing `compute_graph.slots[]`. A slot indexes
 `bindless_images[]` or `bindless_buffers[]` depending on the resource type.
 Image sampling is available through `bindless_textures[]` from the same include.
