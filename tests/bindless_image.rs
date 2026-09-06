@@ -3,7 +3,7 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-use ai_vk::write_bindless_image_png;
+use ai_vk::write_bindless_image_png_with_validation_layers;
 use hassle_rs::compile_hlsl;
 
 #[test]
@@ -31,8 +31,15 @@ fn compute_shader_writes_a_color_through_the_bindless_image_table() {
     let height = 9;
     let color = [12, 98, 201, 255];
 
-    write_bindless_image_png(width, height, color, &spirv, &output_path)
-        .expect("bindless compute image rendering should succeed");
+    write_bindless_image_png_with_validation_layers(
+        width,
+        height,
+        color,
+        &spirv,
+        &output_path,
+        true,
+    )
+    .expect("bindless compute image rendering should succeed");
 
     let rendered = image::open(&output_path)
         .expect("the compute output should be a valid PNG")

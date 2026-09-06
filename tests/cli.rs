@@ -7,7 +7,11 @@ fn run_graph_executes_the_checked_in_toml_example() {
     let output_path = "examples/compute_graph_output.png";
     let _ = fs::remove_file(output_path);
     let output = Command::new(env!("CARGO_BIN_EXE_ai-vk"))
-        .args(["run-graph", "examples/compute_graph.toml"])
+        .args([
+            "--validation-layers",
+            "run-graph",
+            "examples/compute_graph.toml",
+        ])
         .output()
         .expect("CLI should start");
 

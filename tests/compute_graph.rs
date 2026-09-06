@@ -134,7 +134,9 @@ fn executes_dependent_dispatches_and_retains_bindless_slots() {
         "#,
     )
     .expect("graph TOML should parse");
-    let mut execution = graph.execute().expect("compute graph should execute");
+    let mut execution = graph
+        .execute_with_validation_layers(true)
+        .expect("compute graph should execute");
     assert_eq!(
         execution.resource_slot("source"),
         graph.resource_slot("source")
@@ -176,7 +178,9 @@ fn creates_a_persistent_buffer_slot_and_executes_a_buffer_dispatch() {
         output_path.display()
     ))
     .expect("graph TOML should parse");
-    let mut execution = graph.execute().expect("buffer graph should execute");
+    let mut execution = graph
+        .execute_with_validation_layers(true)
+        .expect("buffer graph should execute");
     assert_eq!(execution.resource_slot("output"), Some(0));
     let bytes = execution
         .read_buffer("output")
@@ -232,7 +236,7 @@ fn writes_a_declared_image_output_after_graph_execution() {
     .expect("graph TOML should parse");
 
     graph
-        .execute()
+        .execute_with_validation_layers(true)
         .expect("graph should write its image output");
     let image = image::open(&output_path).expect("declared image output should be a PNG");
     assert_eq!(image.dimensions(), (8, 8));

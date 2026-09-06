@@ -9,7 +9,9 @@ use ash::{Entry, vk};
 use hassle_rs::compile_hlsl;
 use serde::Deserialize;
 
-use crate::{color_subresource_range, find_memory_type, select_compute_queue};
+use crate::{
+    color_subresource_range, create_vulkan_instance, find_memory_type, select_compute_queue,
+};
 
 const MAX_RESOURCES: usize = 64;
 const RESOURCE_TABLE_CAPACITY: usize = 30;
@@ -322,7 +324,14 @@ impl ComputeGraph {
     /// Creates all declared resources, compiles the node shaders, and executes
     /// the graph in dependency order on a compute queue.
     pub fn execute(&self) -> Result<ComputeGraphExecution, ComputeGraphError> {
-        let mut runtime = GraphRuntime::new(self)?;
+        self.execute_with_validation_layers(false)
+    }
+
+    pub fn execute_with_validation_layers(
+        &self,
+        enable_validation_layers: bool,
+    ) -> Result<ComputeGraphExecution, ComputeGraphError> {
+        let mut runtime = GraphRuntime::new(self, enable_validation_layers)?;
         runtime.execute(self)?;
         let mut execution = ComputeGraphExecution { runtime };
         execution.write_outputs(self)?;
@@ -432,8 +441,7 @@ struct GraphBindlessTable {
 }
 
 struct GraphRuntime {
-    _entry: Entry,
-    instance: ash::Instance,
+    instance: crate::VulkanInstance,
     device: ash::Device,
     physical_device: vk::PhysicalDevice,
     queue: vk::Queue,
@@ -446,18 +454,20 @@ struct GraphRuntime {
 }
 
 impl GraphRuntime {
-    fn new(graph: &ComputeGraph) -> Result<Self, ComputeGraphError> {
+    fn new(
+        graph: &ComputeGraph,
+        enable_validation_layers: bool,
+    ) -> Result<Self, ComputeGraphError> {
         let entry = unsafe { Entry::load() }
             .map_err(|error| ComputeGraphError::Invalid(error.to_string()))?;
         let app_name = CString::new("ai-vk-compute-graph").expect("static application name");
-        let app_info = vk::ApplicationInfo::default()
-            .application_name(&app_name)
-            .application_version(vk::make_api_version(0, 1, 0, 0))
-            .engine_name(&app_name)
-            .engine_version(vk::make_api_version(0, 1, 0, 0))
-            .api_version(vk::API_VERSION_1_2);
-        let instance_info = vk::InstanceCreateInfo::default().application_info(&app_info);
-        let instance = unsafe { entry.create_instance(&instance_info, None)? };
+        let instance = create_vulkan_instance(
+            entry,
+            &app_name,
+            vk::API_VERSION_1_2,
+            enable_validation_layers,
+        )
+        .map_err(|error| ComputeGraphError::Invalid(error.to_string()))?;
         let physical_devices = unsafe { instance.enumerate_physical_devices()? };
         let (physical_device, queue_family_index) =
             select_compute_queue(&instance, &physical_devices)
@@ -677,7 +687,6 @@ impl GraphRuntime {
             .queue_family_index(queue_family_index);
         let command_pool = unsafe { device.create_command_pool(&command_pool_info, None)? };
         Ok(Self {
-            _entry: entry,
             instance,
             device,
             physical_device,
@@ -1012,9 +1021,14 @@ impl GraphRuntime {
                 .buffer(buffer.buffer)
                 .offset(0)
                 .size(buffer.size);
+            let source_stage = if buffer.access.contains(vk::AccessFlags::TRANSFER_READ) {
+                vk::PipelineStageFlags::TRANSFER
+            } else {
+                vk::PipelineStageFlags::COMPUTE_SHADER
+            };
             self.device.cmd_pipeline_barrier(
                 command,
-                vk::PipelineStageFlags::COMPUTE_SHADER,
+                source_stage,
                 vk::PipelineStageFlags::TRANSFER,
                 vk::DependencyFlags::empty(),
                 &[],
@@ -1097,7 +1111,6 @@ impl Drop for GraphRuntime {
                 .destroy_descriptor_set_layout(self.sampler.layout, None);
             self.device.destroy_sampler(self.sampler.sampler, None);
             self.device.destroy_device(None);
-            self.instance.destroy_instance(None);
         }
     }
 }

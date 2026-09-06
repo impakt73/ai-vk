@@ -1,8 +1,9 @@
-use ai_vk::enumerate_physical_devices;
+use ai_vk::enumerate_physical_devices_with_validation_layers;
 
 #[test]
 fn identifies_a_valid_physical_device_on_the_host() {
-    let devices = enumerate_physical_devices().expect("Vulkan device enumeration should succeed");
+    let devices = enumerate_physical_devices_with_validation_layers(true)
+        .expect("Vulkan device enumeration should succeed");
 
     assert!(
         devices.iter().any(|device| {

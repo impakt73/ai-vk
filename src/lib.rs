@@ -1,11 +1,134 @@
 use std::{
     ffi::{CStr, CString},
+    ops::Deref,
     path::Path,
 };
 
 use ash::{Entry, vk};
 
 mod compute_graph;
+
+const VALIDATION_LAYER_NAME: &CStr = c"VK_LAYER_KHRONOS_validation";
+
+pub(crate) struct VulkanInstance {
+    _entry: Entry,
+    pub(crate) instance: ash::Instance,
+    debug_utils: Option<ash::ext::debug_utils::Instance>,
+    debug_messenger: Option<vk::DebugUtilsMessengerEXT>,
+}
+
+impl Deref for VulkanInstance {
+    type Target = ash::Instance;
+
+    fn deref(&self) -> &Self::Target {
+        &self.instance
+    }
+}
+
+impl Drop for VulkanInstance {
+    fn drop(&mut self) {
+        unsafe {
+            if let (Some(debug_utils), Some(debug_messenger)) =
+                (&self.debug_utils, self.debug_messenger)
+            {
+                debug_utils.destroy_debug_utils_messenger(debug_messenger, None);
+            }
+            self.instance.destroy_instance(None);
+        }
+    }
+}
+
+pub(crate) fn create_vulkan_instance(
+    entry: Entry,
+    app_name: &CStr,
+    api_version: u32,
+    enable_validation_layers: bool,
+) -> Result<VulkanInstance, Box<dyn std::error::Error>> {
+    let validation_enabled = if enable_validation_layers {
+        let layer_available = unsafe { entry.enumerate_instance_layer_properties()? }
+            .iter()
+            .any(|layer| unsafe { CStr::from_ptr(layer.layer_name.as_ptr()) } == VALIDATION_LAYER_NAME);
+        if !layer_available {
+            return Err(format!(
+                "requested Vulkan validation layer is not available: {}",
+                VALIDATION_LAYER_NAME.to_string_lossy()
+            )
+            .into());
+        }
+        true
+    } else {
+        false
+    };
+    let debug_utils_available = validation_enabled
+        && unsafe { entry.enumerate_instance_extension_properties(None)? }
+            .iter()
+            .any(|extension| unsafe {
+                CStr::from_ptr(extension.extension_name.as_ptr()) == ash::ext::debug_utils::NAME
+            });
+
+    let app_info = vk::ApplicationInfo::default()
+        .application_name(app_name)
+        .application_version(vk::make_api_version(0, 1, 0, 0))
+        .engine_name(app_name)
+        .engine_version(vk::make_api_version(0, 1, 0, 0))
+        .api_version(api_version);
+    let layer_names = [VALIDATION_LAYER_NAME.as_ptr()];
+    let extension_names = [ash::ext::debug_utils::NAME.as_ptr()];
+    let mut debug_create_info = vk::DebugUtilsMessengerCreateInfoEXT::default()
+        .message_severity(
+            vk::DebugUtilsMessageSeverityFlagsEXT::WARNING
+                | vk::DebugUtilsMessageSeverityFlagsEXT::ERROR,
+        )
+        .message_type(
+            vk::DebugUtilsMessageTypeFlagsEXT::GENERAL
+                | vk::DebugUtilsMessageTypeFlagsEXT::VALIDATION
+                | vk::DebugUtilsMessageTypeFlagsEXT::PERFORMANCE,
+        )
+        .pfn_user_callback(Some(vulkan_debug_callback));
+    let mut instance_info = vk::InstanceCreateInfo::default().application_info(&app_info);
+    if validation_enabled {
+        instance_info = instance_info.enabled_layer_names(&layer_names);
+    }
+    if debug_utils_available {
+        instance_info = instance_info.enabled_extension_names(&extension_names);
+        instance_info = instance_info.push_next(&mut debug_create_info);
+    }
+    let instance = unsafe { entry.create_instance(&instance_info, None)? };
+    let (debug_utils, debug_messenger) = if debug_utils_available {
+        let debug_utils = ash::ext::debug_utils::Instance::new(&entry, &instance);
+        let debug_messenger =
+            match unsafe { debug_utils.create_debug_utils_messenger(&debug_create_info, None) } {
+                Ok(debug_messenger) => debug_messenger,
+                Err(error) => {
+                    unsafe { instance.destroy_instance(None) };
+                    return Err(error.into());
+                }
+            };
+        (Some(debug_utils), Some(debug_messenger))
+    } else {
+        (None, None)
+    };
+
+    Ok(VulkanInstance {
+        _entry: entry,
+        instance,
+        debug_utils,
+        debug_messenger,
+    })
+}
+
+unsafe extern "system" fn vulkan_debug_callback(
+    _message_severity: vk::DebugUtilsMessageSeverityFlagsEXT,
+    _message_types: vk::DebugUtilsMessageTypeFlagsEXT,
+    callback_data: *const vk::DebugUtilsMessengerCallbackDataEXT<'_>,
+    _user_data: *mut std::ffi::c_void,
+) -> vk::Bool32 {
+    if !callback_data.is_null() && unsafe { !(*callback_data).p_message.is_null() } {
+        let message = unsafe { CStr::from_ptr((*callback_data).p_message) };
+        eprintln!("[Vulkan validation] {}", message.to_string_lossy());
+    }
+    vk::FALSE
+}
 
 pub use compute_graph::{
     AccessType, ComputeGraph, ComputeGraphDefinition, ComputeGraphError, ComputeGraphExecution,
@@ -24,17 +147,20 @@ pub struct PhysicalDeviceInfo {
 }
 
 pub fn enumerate_physical_devices() -> Result<Vec<PhysicalDeviceInfo>, Box<dyn std::error::Error>> {
+    enumerate_physical_devices_with_validation_layers(false)
+}
+
+pub fn enumerate_physical_devices_with_validation_layers(
+    enable_validation_layers: bool,
+) -> Result<Vec<PhysicalDeviceInfo>, Box<dyn std::error::Error>> {
     let entry = unsafe { Entry::load()? };
     let app_name = CString::new("ai-vk")?;
-    let engine_name = CString::new("ai-vk")?;
-    let app_info = vk::ApplicationInfo::default()
-        .application_name(&app_name)
-        .application_version(vk::make_api_version(0, 1, 0, 0))
-        .engine_name(&engine_name)
-        .engine_version(vk::make_api_version(0, 1, 0, 0))
-        .api_version(vk::API_VERSION_1_0);
-    let instance_info = vk::InstanceCreateInfo::default().application_info(&app_info);
-    let instance = unsafe { entry.create_instance(&instance_info, None)? };
+    let instance = create_vulkan_instance(
+        entry,
+        &app_name,
+        vk::API_VERSION_1_0,
+        enable_validation_layers,
+    )?;
 
     let physical_devices = unsafe { instance.enumerate_physical_devices()? };
     let devices = physical_devices
@@ -64,7 +190,6 @@ pub fn enumerate_physical_devices() -> Result<Vec<PhysicalDeviceInfo>, Box<dyn s
         })
         .collect();
 
-    unsafe { instance.destroy_instance(None) };
     Ok(devices)
 }
 
@@ -78,6 +203,16 @@ pub fn write_cleared_image_png(
     color: [u8; 4],
     output_path: impl AsRef<Path>,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    write_cleared_image_png_with_validation_layers(width, height, color, output_path, false)
+}
+
+pub fn write_cleared_image_png_with_validation_layers(
+    width: u32,
+    height: u32,
+    color: [u8; 4],
+    output_path: impl AsRef<Path>,
+    enable_validation_layers: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
     if width == 0 || height == 0 {
         return Err("image dimensions must be greater than zero".into());
     }
@@ -90,15 +225,12 @@ pub fn write_cleared_image_png(
 
     let entry = unsafe { Entry::load()? };
     let app_name = CString::new("ai-vk")?;
-    let engine_name = CString::new("ai-vk")?;
-    let app_info = vk::ApplicationInfo::default()
-        .application_name(&app_name)
-        .application_version(vk::make_api_version(0, 1, 0, 0))
-        .engine_name(&engine_name)
-        .engine_version(vk::make_api_version(0, 1, 0, 0))
-        .api_version(vk::API_VERSION_1_0);
-    let instance_info = vk::InstanceCreateInfo::default().application_info(&app_info);
-    let instance = unsafe { entry.create_instance(&instance_info, None)? };
+    let instance = create_vulkan_instance(
+        entry,
+        &app_name,
+        vk::API_VERSION_1_0,
+        enable_validation_layers,
+    )?;
 
     let physical_devices = unsafe { instance.enumerate_physical_devices()? };
     let (physical_device, queue_family_index) = select_compute_queue(&instance, &physical_devices)?;
@@ -364,6 +496,24 @@ pub fn write_bindless_image_png(
     shader_spirv: &[u8],
     output_path: impl AsRef<Path>,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    write_bindless_image_png_with_validation_layers(
+        width,
+        height,
+        color,
+        shader_spirv,
+        output_path,
+        false,
+    )
+}
+
+pub fn write_bindless_image_png_with_validation_layers(
+    width: u32,
+    height: u32,
+    color: [u8; 4],
+    shader_spirv: &[u8],
+    output_path: impl AsRef<Path>,
+    enable_validation_layers: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
     if width == 0 || height == 0 {
         return Err("image dimensions must be greater than zero".into());
     }
@@ -381,15 +531,12 @@ pub fn write_bindless_image_png(
 
     let entry = unsafe { Entry::load()? };
     let app_name = CString::new("ai-vk")?;
-    let engine_name = CString::new("ai-vk")?;
-    let app_info = vk::ApplicationInfo::default()
-        .application_name(&app_name)
-        .application_version(vk::make_api_version(0, 1, 0, 0))
-        .engine_name(&engine_name)
-        .engine_version(vk::make_api_version(0, 1, 0, 0))
-        .api_version(vk::API_VERSION_1_2);
-    let instance_info = vk::InstanceCreateInfo::default().application_info(&app_info);
-    let instance = unsafe { entry.create_instance(&instance_info, None)? };
+    let instance = create_vulkan_instance(
+        entry,
+        &app_name,
+        vk::API_VERSION_1_2,
+        enable_validation_layers,
+    )?;
 
     let physical_devices = unsafe { instance.enumerate_physical_devices()? };
     let (physical_device, queue_family_index) = select_compute_queue(&instance, &physical_devices)?;
@@ -745,6 +892,24 @@ pub fn write_sdf_downsampled_image_png(
     downsample_shader_spirv: &[u8],
     output_path: impl AsRef<Path>,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    write_sdf_downsampled_image_png_with_validation_layers(
+        width,
+        height,
+        sdf_shader_spirv,
+        downsample_shader_spirv,
+        output_path,
+        false,
+    )
+}
+
+pub fn write_sdf_downsampled_image_png_with_validation_layers(
+    width: u32,
+    height: u32,
+    sdf_shader_spirv: &[u8],
+    downsample_shader_spirv: &[u8],
+    output_path: impl AsRef<Path>,
+    enable_validation_layers: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
     if width < 2 || height < 2 || !width.is_multiple_of(2) || !height.is_multiple_of(2) {
         return Err("SDF dimensions must be even and at least two pixels".into());
     }
@@ -766,15 +931,12 @@ pub fn write_sdf_downsampled_image_png(
 
     let entry = unsafe { Entry::load()? };
     let app_name = CString::new("ai-vk")?;
-    let engine_name = CString::new("ai-vk")?;
-    let app_info = vk::ApplicationInfo::default()
-        .application_name(&app_name)
-        .application_version(vk::make_api_version(0, 1, 0, 0))
-        .engine_name(&engine_name)
-        .engine_version(vk::make_api_version(0, 1, 0, 0))
-        .api_version(vk::API_VERSION_1_2);
-    let instance_info = vk::InstanceCreateInfo::default().application_info(&app_info);
-    let instance = unsafe { entry.create_instance(&instance_info, None)? };
+    let instance = create_vulkan_instance(
+        entry,
+        &app_name,
+        vk::API_VERSION_1_2,
+        enable_validation_layers,
+    )?;
 
     let physical_devices = unsafe { instance.enumerate_physical_devices()? };
     let (physical_device, queue_family_index) = select_compute_queue(&instance, &physical_devices)?;
@@ -1560,7 +1722,7 @@ struct BindlessPushConstants {
 }
 
 struct ComputeResources {
-    instance: ash::Instance,
+    instance: VulkanInstance,
     device: ash::Device,
     image_table: Option<BindlessImageTable>,
     sampler_table: Option<ImmutableSamplerTable>,
@@ -1582,7 +1744,7 @@ struct ComputeResources {
 
 impl ComputeResources {
     fn new(
-        instance: ash::Instance,
+        instance: VulkanInstance,
         device: ash::Device,
     ) -> Result<Self, Box<dyn std::error::Error>> {
         let image_table = BindlessImageTable::new(&device)?;
@@ -1680,7 +1842,6 @@ impl Drop for ComputeResources {
                 self.device.free_memory(self.source_image_memory, None);
             }
             self.device.destroy_device(None);
-            self.instance.destroy_instance(None);
         }
     }
 }

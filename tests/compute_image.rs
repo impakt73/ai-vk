@@ -3,7 +3,7 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-use ai_vk::write_cleared_image_png;
+use ai_vk::write_cleared_image_png_with_validation_layers;
 
 #[test]
 fn clears_an_image_on_a_compute_queue_and_writes_a_png() {
@@ -19,7 +19,7 @@ fn clears_an_image_on_a_compute_queue_and_writes_a_png() {
     let height = 5;
     let color = [12, 98, 201, 255];
 
-    write_cleared_image_png(width, height, color, &output_path)
+    write_cleared_image_png_with_validation_layers(width, height, color, &output_path, true)
         .expect("compute image rendering should succeed");
 
     let rendered = image::open(&output_path)

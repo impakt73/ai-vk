@@ -3,7 +3,7 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-use ai_vk::write_sdf_downsampled_image_png;
+use ai_vk::write_sdf_downsampled_image_png_with_validation_layers;
 use hassle_rs::compile_hlsl;
 
 const WIDTH: u32 = 48;
@@ -39,8 +39,15 @@ fn raymarches_and_bilinearly_downsamples_three_phong_shaded_spheres() {
             .expect("system clock should be after the Unix epoch")
             .as_nanos()
     ));
-    write_sdf_downsampled_image_png(WIDTH, HEIGHT, &sdf_spirv, &downsample_spirv, &output_path)
-        .expect("SDF raymarch downsampling should succeed");
+    write_sdf_downsampled_image_png_with_validation_layers(
+        WIDTH,
+        HEIGHT,
+        &sdf_spirv,
+        &downsample_spirv,
+        &output_path,
+        true,
+    )
+    .expect("SDF raymarch downsampling should succeed");
 
     let rendered = image::open(&output_path)
         .expect("the downsampled output should be a valid PNG")

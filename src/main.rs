@@ -1,11 +1,17 @@
 use std::path::{Path, PathBuf};
 
-use ai_vk::{ComputeGraph, enumerate_physical_devices, write_cleared_image_png};
+use ai_vk::{
+    ComputeGraph, enumerate_physical_devices_with_validation_layers,
+    write_cleared_image_png_with_validation_layers,
+};
 use clap::{Parser, Subcommand};
 
 #[derive(Debug, Parser)]
 #[command(name = "ai-vk", version, about = "Vulkan compute image utilities")]
 struct Cli {
+    /// Enable the Vulkan Khronos validation layers.
+    #[arg(long)]
+    validation_layers: bool,
     #[command(subcommand)]
     command: Option<Command>,
 }
@@ -39,27 +45,37 @@ fn main() {
 }
 
 fn run() -> Result<(), Box<dyn std::error::Error>> {
-    match Cli::parse().command {
+    let cli = Cli::parse();
+    match cli.command {
         Some(Command::CreateImage {
             width,
             height,
             color,
             output,
         }) => {
-            write_cleared_image_png(width, height, color, &output)?;
+            write_cleared_image_png_with_validation_layers(
+                width,
+                height,
+                color,
+                &output,
+                cli.validation_layers,
+            )?;
             println!("wrote {width}x{height} image to {}", output.display());
             Ok(())
         }
-        Some(Command::RunGraph { graph }) => run_graph(&graph),
-        None => list_physical_devices(),
+        Some(Command::RunGraph { graph }) => run_graph(&graph, cli.validation_layers),
+        None => list_physical_devices(cli.validation_layers),
     }
 }
 
-fn run_graph(path: &Path) -> Result<(), Box<dyn std::error::Error>> {
+fn run_graph(
+    path: &Path,
+    enable_validation_layers: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
     let graph = ComputeGraph::from_toml_file(path)?;
     let node_count = graph.definition().nodes.len();
     let resource_count = graph.definition().resources.len();
-    graph.execute()?;
+    graph.execute_with_validation_layers(enable_validation_layers)?;
     println!(
         "executed compute graph {} ({} nodes, {} resources)",
         path.display(),
@@ -69,8 +85,9 @@ fn run_graph(path: &Path) -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-fn list_physical_devices() -> Result<(), Box<dyn std::error::Error>> {
-    let physical_devices = enumerate_physical_devices()?;
+fn list_physical_devices(enable_validation_layers: bool) -> Result<(), Box<dyn std::error::Error>> {
+    let physical_devices =
+        enumerate_physical_devices_with_validation_layers(enable_validation_layers)?;
 
     println!("Vulkan physical devices: {}", physical_devices.len());
     for (index, physical_device) in physical_devices.iter().enumerate() {

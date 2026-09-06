@@ -13,6 +13,10 @@ With the Vulkan SDK environment active, run the complete test suite with:
 cargo test --all-targets
 ```
 
+Vulkan integration tests enable `VK_LAYER_KHRONOS_validation` and report
+validation errors and warnings through the test output. The layer must be
+available through the active Vulkan SDK environment.
+
 ## Compute Graphs
 
 `ComputeGraph::from_toml` loads a graph whose resources are allocated once and
@@ -23,6 +27,13 @@ The CLI can execute an externally authored graph without any Rust code changes:
 
 ```text
 cargo run -- run-graph examples/compute_graph.toml
+```
+
+Validation is optional for the CLI. Add `--validation-layers` before the
+subcommand to enable it for image creation, graph execution, or device listing:
+
+```text
+cargo run -- --validation-layers run-graph examples/compute_graph.toml
 ```
 
 Use `examples/compute_graph.toml` as a starting point for changing resources,
