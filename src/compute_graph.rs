@@ -1,4 +1,5 @@
 use std::{
+    borrow::Cow,
     collections::{BTreeMap, BTreeSet},
     ffi::CString,
     fmt, fs,
@@ -79,6 +80,9 @@ pub struct ComputeNodeDefinition {
     pub name: String,
     #[serde(alias = "shader_path", alias = "source", alias = "hlsl")]
     pub shader: PathBuf,
+    /// Optional in-memory HLSL source used by built-in graph helpers.
+    #[serde(default)]
+    pub shader_source: Option<String>,
     pub kernel: String,
     #[serde(alias = "dispatch_size")]
     pub dispatch: [u32; 3],
@@ -178,8 +182,22 @@ impl ComputeGraph {
         Self::from_toml_with_base(&source, base_dir)
     }
 
+    pub fn from_definition(
+        definition: ComputeGraphDefinition,
+        base_dir: impl Into<PathBuf>,
+    ) -> Result<Self, ComputeGraphError> {
+        Self::from_definition_with_base(definition, base_dir.into())
+    }
+
     fn from_toml_with_base(source: &str, base_dir: PathBuf) -> Result<Self, ComputeGraphError> {
         let definition = toml::from_str::<ComputeGraphDefinition>(source)?;
+        Self::from_definition_with_base(definition, base_dir)
+    }
+
+    fn from_definition_with_base(
+        definition: ComputeGraphDefinition,
+        base_dir: PathBuf,
+    ) -> Result<Self, ComputeGraphError> {
         let mut slots = BTreeMap::new();
         for (index, name) in definition.resources.keys().enumerate() {
             if index >= MAX_RESOURCES {
@@ -337,6 +355,64 @@ impl ComputeGraph {
         execution.write_outputs(self)?;
         Ok(execution)
     }
+
+    pub fn write_solid_color_png(
+        width: u32,
+        height: u32,
+        color: [u8; 4],
+        output_path: impl AsRef<Path>,
+        enable_validation_layers: bool,
+    ) -> Result<(), ComputeGraphError> {
+        let color = color.map(|channel| f32::from(channel) / 255.0);
+        let source = format!(
+            "#define AI_VK_SOLID_COLOR float4({}, {}, {}, {})\n{}",
+            color[0],
+            color[1],
+            color[2],
+            color[3],
+            include_str!("../shaders/solid_color.hlsl")
+        );
+        let mut resources = BTreeMap::new();
+        resources.insert(
+            "output".into(),
+            ResourceDefinition {
+                kind: ResourceKind::Image,
+                width: Some(width),
+                height: Some(height),
+                extent: None,
+                size: None,
+                output: None,
+            },
+        );
+        let graph = Self::from_definition(
+            ComputeGraphDefinition {
+                resources,
+                nodes: vec![ComputeNodeDefinition {
+                    name: "solid-color".into(),
+                    shader: PathBuf::from("solid_color_builtin.hlsl"),
+                    shader_source: Some(source),
+                    kernel: "main".into(),
+                    dispatch: [width.div_ceil(8), height.div_ceil(8), 1],
+                    bindings: vec![ResourceBindingDefinition {
+                        resource: "output".into(),
+                        access: AccessType::Write,
+                    }],
+                }],
+            },
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("shaders"),
+        )?;
+        let mut execution = graph.execute_with_validation_layers(enable_validation_layers)?;
+        let (width, height, pixels) = execution.read_image_rgba8("output")?;
+        image::save_buffer_with_format(
+            output_path,
+            &pixels,
+            width,
+            height,
+            image::ColorType::Rgba8,
+            image::ImageFormat::Png,
+        )?;
+        Ok(())
+    }
 }
 
 /// Resources and GPU state retained after graph execution for inspection.
@@ -440,13 +516,85 @@ struct GraphBindlessTable {
     set: vk::DescriptorSet,
 }
 
+struct ImmutableSamplerTable {
+    layout: vk::DescriptorSetLayout,
+    pool: vk::DescriptorPool,
+    set: vk::DescriptorSet,
+    sampler: vk::Sampler,
+}
+
+impl ImmutableSamplerTable {
+    fn new(device: &ash::Device) -> Result<Self, ComputeGraphError> {
+        let sampler_info = vk::SamplerCreateInfo::default()
+            .mag_filter(vk::Filter::LINEAR)
+            .min_filter(vk::Filter::LINEAR)
+            .mipmap_mode(vk::SamplerMipmapMode::LINEAR)
+            .address_mode_u(vk::SamplerAddressMode::CLAMP_TO_EDGE)
+            .address_mode_v(vk::SamplerAddressMode::CLAMP_TO_EDGE)
+            .address_mode_w(vk::SamplerAddressMode::CLAMP_TO_EDGE)
+            .max_lod(0.0);
+        let sampler = unsafe { device.create_sampler(&sampler_info, None)? };
+        let binding = vk::DescriptorSetLayoutBinding::default()
+            .binding(0)
+            .descriptor_type(vk::DescriptorType::SAMPLER)
+            .descriptor_count(1)
+            .stage_flags(vk::ShaderStageFlags::COMPUTE)
+            .immutable_samplers(std::slice::from_ref(&sampler));
+        let layout_info =
+            vk::DescriptorSetLayoutCreateInfo::default().bindings(std::slice::from_ref(&binding));
+        let layout = match unsafe { device.create_descriptor_set_layout(&layout_info, None) } {
+            Ok(layout) => layout,
+            Err(error) => {
+                unsafe { device.destroy_sampler(sampler, None) };
+                return Err(error.into());
+            }
+        };
+        let pool_size = vk::DescriptorPoolSize::default()
+            .ty(vk::DescriptorType::SAMPLER)
+            .descriptor_count(1);
+        let pool_info = vk::DescriptorPoolCreateInfo::default()
+            .max_sets(1)
+            .pool_sizes(std::slice::from_ref(&pool_size));
+        let pool = match unsafe { device.create_descriptor_pool(&pool_info, None) } {
+            Ok(pool) => pool,
+            Err(error) => {
+                unsafe {
+                    device.destroy_descriptor_set_layout(layout, None);
+                    device.destroy_sampler(sampler, None);
+                }
+                return Err(error.into());
+            }
+        };
+        let set_info = vk::DescriptorSetAllocateInfo::default()
+            .descriptor_pool(pool)
+            .set_layouts(std::slice::from_ref(&layout));
+        let set = match unsafe { device.allocate_descriptor_sets(&set_info) } {
+            Ok(sets) => sets[0],
+            Err(error) => {
+                unsafe {
+                    device.destroy_descriptor_pool(pool, None);
+                    device.destroy_descriptor_set_layout(layout, None);
+                    device.destroy_sampler(sampler, None);
+                }
+                return Err(error.into());
+            }
+        };
+        Ok(Self {
+            layout,
+            pool,
+            set,
+            sampler,
+        })
+    }
+}
+
 struct GraphRuntime {
     instance: crate::VulkanInstance,
     device: ash::Device,
     physical_device: vk::PhysicalDevice,
     queue: vk::Queue,
     bindless: GraphBindlessTable,
-    sampler: crate::ImmutableSamplerTable,
+    sampler: ImmutableSamplerTable,
     resources: BTreeMap<String, RuntimeResource>,
     nodes: Vec<GraphNode>,
     pipeline_layout: vk::PipelineLayout,
@@ -514,7 +662,7 @@ impl GraphRuntime {
         let device = unsafe { instance.create_device(physical_device, &device_info, None)? };
         let queue = unsafe { device.get_device_queue(queue_family_index, 0) };
         let bindless = create_graph_bindless_table(&device)?;
-        let sampler = crate::ImmutableSamplerTable::new(&device)
+        let sampler = ImmutableSamplerTable::new(&device)
             .map_err(|error| ComputeGraphError::Invalid(error.to_string()))?;
 
         let mut resources = BTreeMap::new();
@@ -629,7 +777,10 @@ impl GraphRuntime {
         let mut nodes = Vec::with_capacity(graph.definition.nodes.len());
         for node in &graph.definition.nodes {
             let shader_path = graph.base_dir.join(&node.shader);
-            let source = fs::read_to_string(&shader_path)?;
+            let source = match &node.shader_source {
+                Some(source) => Cow::Borrowed(source.as_str()),
+                None => Cow::Owned(fs::read_to_string(&shader_path)?),
+            };
             let spirv = compile_hlsl(
                 &shader_path.to_string_lossy(),
                 &source,
