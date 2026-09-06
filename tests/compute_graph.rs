@@ -1,4 +1,20 @@
+use std::{
+    fs,
+    path::PathBuf,
+    sync::atomic::{AtomicUsize, Ordering},
+};
+
 use ai_vk::{AccessType, ComputeGraph, ResourceKind};
+use image::GenericImageView;
+
+fn temporary_output(extension: &str) -> PathBuf {
+    static NEXT_OUTPUT: AtomicUsize = AtomicUsize::new(0);
+    let index = NEXT_OUTPUT.fetch_add(1, Ordering::Relaxed);
+    std::env::temp_dir().join(format!(
+        "ai-vk-compute-graph-{}-{index}.{extension}",
+        std::process::id()
+    ))
+}
 
 #[test]
 fn parses_resources_nodes_and_resource_hazards_from_toml() {
@@ -72,6 +88,17 @@ fn rejects_unknown_resources_and_invalid_dimensions() {
     )
     .expect_err("zero-sized images should be rejected");
     assert!(invalid_image.to_string().contains("non-zero width"));
+
+    let invalid_output = ComputeGraph::from_toml(
+        r#"
+            [resources.output]
+            type = "image"
+            extent = [8, 8]
+            output = "output.raw"
+        "#,
+    )
+    .expect_err("image outputs without a .png extension should be rejected");
+    assert!(invalid_output.to_string().contains(".png extension"));
 }
 
 #[test]
@@ -131,20 +158,23 @@ fn executes_dependent_dispatches_and_retains_bindless_slots() {
 
 #[test]
 fn creates_a_persistent_buffer_slot_and_executes_a_buffer_dispatch() {
-    let graph = ComputeGraph::from_toml(
+    let output_path = temporary_output("bin");
+    let graph = ComputeGraph::from_toml(&format!(
         r#"
             [resources.output]
             type = "buffer"
             size = 64
+            output = "{}"
 
             [[nodes]]
             name = "fill"
             shader = "shaders/graph_buffer_fill.hlsl"
             kernel = "main"
             dispatch = [16, 1, 1]
-            bindings = [{ resource = "output", access = "write" }]
+            bindings = [{{ resource = "output", access = "write" }}]
         "#,
-    )
+        output_path.display()
+    ))
     .expect("graph TOML should parse");
     let mut execution = graph.execute().expect("buffer graph should execute");
     assert_eq!(execution.resource_slot("output"), Some(0));
@@ -161,4 +191,51 @@ fn creates_a_persistent_buffer_slot_and_executes_a_buffer_dispatch() {
         values,
         (0..16).map(|index| index * 3 + 7).collect::<Vec<_>>()
     );
+    let output = fs::read(&output_path).expect("buffer output should be written as raw bytes");
+    assert_eq!(output, bytes);
+    fs::remove_file(output_path).expect("test output should be removable");
+}
+
+#[test]
+fn writes_a_declared_image_output_after_graph_execution() {
+    let output_path = temporary_output("PNG");
+    let graph = ComputeGraph::from_toml(&format!(
+        r#"
+            [resources.source]
+            type = "image"
+            extent = [8, 8]
+
+            [resources.output]
+            type = "image"
+            extent = [8, 8]
+            output = "{}"
+
+            [[nodes]]
+            name = "fill"
+            shader = "shaders/graph_fill.hlsl"
+            kernel = "main"
+            dispatch = [1, 1, 1]
+            bindings = [{{ resource = "source", access = "write" }}]
+
+            [[nodes]]
+            name = "copy"
+            shader = "shaders/graph_copy.hlsl"
+            kernel = "main"
+            dispatch = [1, 1, 1]
+            bindings = [
+                {{ resource = "source", access = "read" }},
+                {{ resource = "output", access = "write" }},
+            ]
+        "#,
+        output_path.display()
+    ))
+    .expect("graph TOML should parse");
+
+    graph
+        .execute()
+        .expect("graph should write its image output");
+    let image = image::open(&output_path).expect("declared image output should be a PNG");
+    assert_eq!(image.dimensions(), (8, 8));
+    assert_eq!(image.to_rgba8().get_pixel(0, 0).0, [12, 98, 201, 255]);
+    fs::remove_file(output_path).expect("test output should be removable");
 }

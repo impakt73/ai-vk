@@ -8,6 +8,7 @@ extent = [8, 8]
 [resources.output]
 type = "image"
 extent = [8, 8]
+output = "compute_graph_output.png"
 
 [[nodes]]
 name = "fill-source"

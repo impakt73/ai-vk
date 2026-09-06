@@ -57,6 +57,9 @@ pub struct ResourceDefinition {
     pub extent: Option<[u32; 2]>,
     #[serde(default)]
     pub size: Option<u64>,
+    /// Optional output path, resolved relative to the graph TOML file.
+    #[serde(default)]
+    pub output: Option<PathBuf>,
 }
 
 /// A resource use declared in a node's `bindings` array.
@@ -94,6 +97,7 @@ pub struct ComputeGraphDefinition {
 #[derive(Debug)]
 pub enum ComputeGraphError {
     Io(std::io::Error),
+    Image(image::ImageError),
     Parse(toml::de::Error),
     Invalid(String),
     Vulkan(vk::Result),
@@ -104,6 +108,7 @@ impl fmt::Display for ComputeGraphError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Io(error) => write!(formatter, "I/O error: {error}"),
+            Self::Image(error) => write!(formatter, "image output error: {error}"),
             Self::Parse(error) => write!(formatter, "TOML error: {error}"),
             Self::Invalid(error) => formatter.write_str(error),
             Self::Vulkan(error) => write!(formatter, "Vulkan error: {error:?}"),
@@ -117,6 +122,12 @@ impl std::error::Error for ComputeGraphError {}
 impl From<std::io::Error> for ComputeGraphError {
     fn from(error: std::io::Error) -> Self {
         Self::Io(error)
+    }
+}
+
+impl From<image::ImageError> for ComputeGraphError {
+    fn from(error: image::ImageError) -> Self {
+        Self::Image(error)
     }
 }
 
@@ -191,6 +202,19 @@ impl ComputeGraph {
                     if width == 0 || height == 0 {
                         return Err(ComputeGraphError::Invalid(format!(
                             "image resource `{name}` must have non-zero width and height"
+                        )));
+                    }
+                    if let Some(output) = &resource.output
+                        && !output
+                            .extension()
+                            .map(|extension| {
+                                extension.to_string_lossy().eq_ignore_ascii_case("png")
+                            })
+                            .unwrap_or(false)
+                    {
+                        return Err(ComputeGraphError::Invalid(format!(
+                            "image resource `{name}` output path `{}` must use a .png extension",
+                            output.display()
                         )));
                     }
                 }
@@ -300,7 +324,9 @@ impl ComputeGraph {
     pub fn execute(&self) -> Result<ComputeGraphExecution, ComputeGraphError> {
         let mut runtime = GraphRuntime::new(self)?;
         runtime.execute(self)?;
-        Ok(ComputeGraphExecution { runtime })
+        let mut execution = ComputeGraphExecution { runtime };
+        execution.write_outputs(self)?;
+        Ok(execution)
     }
 }
 
@@ -328,6 +354,36 @@ impl ComputeGraphExecution {
     /// Copies a buffer resource to host memory.
     pub fn read_buffer(&mut self, name: &str) -> Result<Vec<u8>, ComputeGraphError> {
         self.runtime.read_buffer(name)
+    }
+
+    fn write_outputs(&mut self, graph: &ComputeGraph) -> Result<(), ComputeGraphError> {
+        for (name, resource) in &graph.definition.resources {
+            let Some(output) = &resource.output else {
+                continue;
+            };
+            let output = graph.base_dir.join(output);
+            if let Some(parent) = output.parent() {
+                fs::create_dir_all(parent)?;
+            }
+            match resource.kind {
+                ResourceKind::Image => {
+                    let (width, height, pixels) = self.runtime.read_image(name)?;
+                    image::save_buffer_with_format(
+                        &output,
+                        &pixels,
+                        width,
+                        height,
+                        image::ColorType::Rgba8,
+                        image::ImageFormat::Png,
+                    )?;
+                }
+                ResourceKind::Buffer => {
+                    let bytes = self.runtime.read_buffer(name)?;
+                    fs::write(output, bytes)?;
+                }
+            }
+        }
+        Ok(())
     }
 }
 

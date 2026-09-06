@@ -29,6 +29,22 @@ Use `examples/compute_graph.toml` as a starting point for changing resources,
 dispatches, dependencies, and shader paths. The command reports graph parsing,
 shader compilation, Vulkan setup, and execution errors directly.
 
+Resources can declare an output path. Paths are relative to the graph TOML file;
+images are written as PNG files and buffers are written as raw binary after all
+graph dispatches have completed:
+
+```toml
+[resources.image]
+type = "image"
+extent = [512, 512]
+output = "result.png"
+
+[resources.data]
+type = "buffer"
+size = 1024
+output = "result.bin"
+```
+
 ```toml
 [resources.source]
 type = "image"
