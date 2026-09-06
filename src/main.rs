@@ -1,6 +1,6 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
-use ai_vk::{enumerate_physical_devices, write_cleared_image_png};
+use ai_vk::{ComputeGraph, enumerate_physical_devices, write_cleared_image_png};
 use clap::{Parser, Subcommand};
 
 #[derive(Debug, Parser)]
@@ -24,6 +24,11 @@ enum Command {
         /// Destination PNG path.
         output: PathBuf,
     },
+    /// Load, compile, and execute a compute graph from a TOML file.
+    RunGraph {
+        /// Compute graph TOML file.
+        graph: PathBuf,
+    },
 }
 
 fn main() {
@@ -45,8 +50,23 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             println!("wrote {width}x{height} image to {}", output.display());
             Ok(())
         }
+        Some(Command::RunGraph { graph }) => run_graph(&graph),
         None => list_physical_devices(),
     }
+}
+
+fn run_graph(path: &Path) -> Result<(), Box<dyn std::error::Error>> {
+    let graph = ComputeGraph::from_toml_file(path)?;
+    let node_count = graph.definition().nodes.len();
+    let resource_count = graph.definition().resources.len();
+    graph.execute()?;
+    println!(
+        "executed compute graph {} ({} nodes, {} resources)",
+        path.display(),
+        node_count,
+        resource_count
+    );
+    Ok(())
 }
 
 fn list_physical_devices() -> Result<(), Box<dyn std::error::Error>> {

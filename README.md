@@ -19,6 +19,16 @@ cargo test --all-targets
 kept in persistent bindless slots for the lifetime of the execution. Shader
 paths in `ComputeGraph::from_toml_file` are relative to the TOML file.
 
+The CLI can execute an externally authored graph without any Rust code changes:
+
+```text
+cargo run -- run-graph examples/compute_graph.toml
+```
+
+Use `examples/compute_graph.toml` as a starting point for changing resources,
+dispatches, dependencies, and shader paths. The command reports graph parsing,
+shader compilation, Vulkan setup, and execution errors directly.
+
 ```toml
 [resources.source]
 type = "image"

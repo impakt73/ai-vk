@@ -1,0 +1,27 @@
+# Run from the repository root with:
+# cargo run -- run-graph examples/compute_graph.toml
+
+[resources.source]
+type = "image"
+extent = [8, 8]
+
+[resources.output]
+type = "image"
+extent = [8, 8]
+
+[[nodes]]
+name = "fill-source"
+shader = "../shaders/graph_fill.hlsl"
+kernel = "main"
+dispatch = [1, 1, 1]
+bindings = [{ resource = "source", access = "write" }]
+
+[[nodes]]
+name = "copy-to-output"
+shader = "../shaders/graph_copy.hlsl"
+kernel = "main"
+dispatch = [1, 1, 1]
+bindings = [
+    { resource = "source", access = "read" },
+    { resource = "output", access = "write" },
+]
