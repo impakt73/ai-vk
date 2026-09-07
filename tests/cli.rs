@@ -25,6 +25,7 @@ fn run_graph_executes_the_checked_in_toml_example() {
         String::from_utf8_lossy(&output.stderr)
     );
     assert!(String::from_utf8_lossy(&output.stdout).contains("executed compute graph"));
+    assert!(String::from_utf8_lossy(&output.stdout).contains("GPU execution time:"));
     let image = image::open(output_path).expect("graph should write its declared image output");
     assert_eq!(image.dimensions(), (4, 4));
     fs::remove_file(output_path).expect("test output should be removable");

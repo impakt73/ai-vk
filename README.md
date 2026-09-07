@@ -70,6 +70,18 @@ Use `examples/compute_graph.toml` as a starting point for changing resources,
 dispatches, dependencies, and shader paths. The command reports graph parsing,
 shader compilation, Vulkan setup, and execution errors directly.
 
+After execution, the CLI reports the GPU timestamp duration for the graph. For
+example:
+
+```text
+executed compute graph examples/compute_graph.toml (2 nodes, 2 resources)
+GPU execution time: 1.37 ms
+```
+
+The duration is measured on the GPU around the graph dispatches and does not
+include host-side output readback. Devices without compute timestamp support
+report `GPU execution time: unavailable`.
+
 Resources can declare an output path. Paths are relative to the graph TOML file;
 images are written as PNG files and buffers are written as raw binary after all
 graph dispatches have completed:

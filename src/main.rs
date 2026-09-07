@@ -1,6 +1,7 @@
 use std::{
     collections::BTreeMap,
     path::{Path, PathBuf},
+    time::Duration,
 };
 
 use ai_vk::{ComputeGraph, enumerate_physical_devices_with_validation_layers};
@@ -59,14 +60,31 @@ fn run_graph(
     let graph = ComputeGraph::from_toml_file_with_arguments(path, &arguments)?;
     let node_count = graph.definition().nodes.len();
     let resource_count = graph.definition().resources.len();
-    graph.execute_with_validation_layers(enable_validation_layers)?;
+    let execution = graph.execute_with_validation_layers(enable_validation_layers)?;
     println!(
         "executed compute graph {} ({} nodes, {} resources)",
         path.display(),
         node_count,
         resource_count
     );
+    match execution.gpu_execution_time() {
+        Some(duration) => println!("GPU execution time: {}", format_duration(duration)),
+        None => println!("GPU execution time: unavailable"),
+    }
     Ok(())
+}
+
+fn format_duration(duration: Duration) -> String {
+    let nanos = duration.as_nanos();
+    if nanos < 1_000 {
+        format!("{nanos} ns")
+    } else if nanos < 1_000_000 {
+        format!("{:.2} us", nanos as f64 / 1_000.0)
+    } else if nanos < 1_000_000_000 {
+        format!("{:.2} ms", nanos as f64 / 1_000_000.0)
+    } else {
+        format!("{:.2} s", nanos as f64 / 1_000_000_000.0)
+    }
 }
 
 fn parse_arguments(raw_arguments: &[String]) -> Result<BTreeMap<String, String>, String> {

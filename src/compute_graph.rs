@@ -3,6 +3,7 @@ use std::{
     ffi::CString,
     fmt, fs,
     path::{Path, PathBuf},
+    time::Duration,
 };
 
 use ash::{Entry, vk};
@@ -733,8 +734,11 @@ impl ComputeGraph {
         enable_validation_layers: bool,
     ) -> Result<ComputeGraphExecution, ComputeGraphError> {
         let mut runtime = GraphRuntime::new(self, enable_validation_layers)?;
-        runtime.execute(self)?;
-        let mut execution = ComputeGraphExecution { runtime };
+        let gpu_execution_time = runtime.execute(self)?;
+        let mut execution = ComputeGraphExecution {
+            runtime,
+            gpu_execution_time,
+        };
         execution.write_outputs(self)?;
         Ok(execution)
     }
@@ -743,9 +747,18 @@ impl ComputeGraph {
 /// Resources and GPU state retained after graph execution for inspection.
 pub struct ComputeGraphExecution {
     runtime: GraphRuntime,
+    gpu_execution_time: Option<Duration>,
 }
 
 impl ComputeGraphExecution {
+    /// Returns the elapsed time measured by GPU timestamps around graph execution.
+    ///
+    /// This is `None` when the selected compute queue does not support timestamp
+    /// queries for compute work.
+    pub fn gpu_execution_time(&self) -> Option<Duration> {
+        self.gpu_execution_time
+    }
+
     pub fn resource_slot(&self, name: &str) -> Option<u32> {
         self.runtime
             .resources
@@ -925,6 +938,9 @@ struct GraphRuntime {
     nodes: Vec<GraphNode>,
     pipeline_layout: vk::PipelineLayout,
     command_pool: vk::CommandPool,
+    timestamp_query_pool: Option<vk::QueryPool>,
+    timestamp_period: f32,
+    timestamp_valid_bits: u32,
 }
 
 impl GraphRuntime {
@@ -946,6 +962,13 @@ impl GraphRuntime {
         let (physical_device, queue_family_index) =
             select_compute_queue(&instance, &physical_devices)
                 .map_err(|error| ComputeGraphError::Invalid(error.to_string()))?;
+        let physical_properties =
+            unsafe { instance.get_physical_device_properties(physical_device) };
+        let queue_families =
+            unsafe { instance.get_physical_device_queue_family_properties(physical_device) };
+        let queue_family = queue_families
+            .get(queue_family_index as usize)
+            .ok_or_else(|| ComputeGraphError::Invalid("selected queue family is invalid".into()))?;
 
         let mut supported_descriptor = vk::PhysicalDeviceDescriptorIndexingFeatures::default();
         let mut supported =
@@ -1157,6 +1180,18 @@ impl GraphRuntime {
             .flags(vk::CommandPoolCreateFlags::TRANSIENT)
             .queue_family_index(queue_family_index);
         let command_pool = unsafe { device.create_command_pool(&command_pool_info, None)? };
+        let timestamp_valid_bits = queue_family.timestamp_valid_bits;
+        let timestamp_period = physical_properties.limits.timestamp_period;
+        let timestamp_query_pool = if timestamp_valid_bits > 0
+            && physical_properties.limits.timestamp_compute_and_graphics == vk::TRUE
+        {
+            let query_pool_info = vk::QueryPoolCreateInfo::default()
+                .query_type(vk::QueryType::TIMESTAMP)
+                .query_count(2);
+            Some(unsafe { device.create_query_pool(&query_pool_info, None)? })
+        } else {
+            None
+        };
         let mut runtime = Self {
             instance,
             device,
@@ -1168,6 +1203,9 @@ impl GraphRuntime {
             nodes,
             pipeline_layout,
             command_pool,
+            timestamp_query_pool,
+            timestamp_period,
+            timestamp_valid_bits,
         };
         runtime.upload_inputs(graph)?;
         Ok(runtime)
@@ -1346,7 +1384,7 @@ impl GraphRuntime {
         Ok(())
     }
 
-    fn execute(&mut self, graph: &ComputeGraph) -> Result<(), ComputeGraphError> {
+    fn execute(&mut self, graph: &ComputeGraph) -> Result<Option<Duration>, ComputeGraphError> {
         let allocate_info = vk::CommandBufferAllocateInfo::default()
             .command_pool(self.command_pool)
             .level(vk::CommandBufferLevel::PRIMARY)
@@ -1356,6 +1394,18 @@ impl GraphRuntime {
             self.device
                 .begin_command_buffer(command_buffer, &vk::CommandBufferBeginInfo::default())?
         };
+        if let Some(query_pool) = self.timestamp_query_pool {
+            unsafe {
+                self.device
+                    .cmd_reset_query_pool(command_buffer, query_pool, 0, 2);
+                self.device.cmd_write_timestamp(
+                    command_buffer,
+                    vk::PipelineStageFlags::TOP_OF_PIPE,
+                    query_pool,
+                    0,
+                );
+            }
+        }
         let descriptor_sets = [self.sampler.set, self.bindless.set];
         let mut completed = vec![false; graph.definition.nodes.len()];
         let mut completed_count = 0;
@@ -1419,6 +1469,16 @@ impl GraphRuntime {
             completed[node_index] = true;
             completed_count += 1;
         }
+        if let Some(query_pool) = self.timestamp_query_pool {
+            unsafe {
+                self.device.cmd_write_timestamp(
+                    command_buffer,
+                    vk::PipelineStageFlags::COMPUTE_SHADER,
+                    query_pool,
+                    1,
+                );
+            }
+        }
         unsafe {
             self.device.end_command_buffer(command_buffer)?;
             let submit =
@@ -1430,7 +1490,31 @@ impl GraphRuntime {
             )?;
             self.device.queue_wait_idle(self.queue)?;
         }
-        Ok(())
+        self.read_timestamps()
+    }
+
+    fn read_timestamps(&self) -> Result<Option<Duration>, ComputeGraphError> {
+        let Some(query_pool) = self.timestamp_query_pool else {
+            return Ok(None);
+        };
+        let mut timestamps = [0_u64; 2];
+        unsafe {
+            self.device.get_query_pool_results(
+                query_pool,
+                0,
+                &mut timestamps,
+                vk::QueryResultFlags::TYPE_64,
+            )?;
+        }
+        let timestamp_mask = if self.timestamp_valid_bits >= u64::BITS {
+            u64::MAX
+        } else {
+            (1_u64 << self.timestamp_valid_bits) - 1
+        };
+        let elapsed_ticks = timestamps[1].wrapping_sub(timestamps[0]) & timestamp_mask;
+        let elapsed_nanos = (elapsed_ticks as f64 * f64::from(self.timestamp_period)).round();
+        let elapsed_nanos = elapsed_nanos.min(u64::MAX as f64) as u64;
+        Ok(Some(Duration::from_nanos(elapsed_nanos)))
     }
 
     fn record_barriers(
@@ -1774,6 +1858,9 @@ impl Drop for GraphRuntime {
             }
             self.device
                 .destroy_pipeline_layout(self.pipeline_layout, None);
+            if let Some(query_pool) = self.timestamp_query_pool {
+                self.device.destroy_query_pool(query_pool, None);
+            }
             for runtime_resource in self.resources.values() {
                 match &runtime_resource.resource {
                     GraphResource::Image(image) => {
