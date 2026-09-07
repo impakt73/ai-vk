@@ -23,14 +23,14 @@ output = "sdf_bilinear_upsampled.png"
 name = "raymarch"
 shader = "sdf_raymarch.hlsl"
 kernel = "main"
-dispatch = [3, 2, 1]
+dispatch = ["$div_align($source_width, 8)", "$div_align($source_height, 8)", 1]
 bindings = [{ resource = "source", access = "write" }]
 
 [[nodes]]
 name = "bilinear-upsample"
 shader = "bilinear_upsample.hlsl"
 kernel = "main"
-dispatch = [6, 4, 1]
+dispatch = ["$div_align($output_width, 8)", "$div_align($output_height, 8)", 1]
 bindings = [
     { resource = "source", access = "read" },
     { resource = "output", access = "write" },

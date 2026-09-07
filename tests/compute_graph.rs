@@ -140,6 +140,25 @@ fn resolves_graph_arguments_in_dimensions_and_dispatches() {
 }
 
 #[test]
+fn resolves_aligned_division_in_dispatch_dimensions() {
+    let graph = ComputeGraph::from_toml(
+        r#"
+            [arguments]
+            output_width = "17"
+
+            [[nodes]]
+            name = "fill"
+            shader = "fill.hlsl"
+            kernel = "main"
+            dispatch = ["$div_align($output_width, 8)", 1, 1]
+        "#,
+    )
+    .expect("aligned dispatch dimensions should resolve");
+
+    assert_eq!(graph.definition().nodes[0].dispatch, [3, 1, 1]);
+}
+
+#[test]
 fn rejects_undeclared_graph_argument_overrides() {
     let mut overrides = BTreeMap::new();
     overrides.insert("width".into(), "16".into());

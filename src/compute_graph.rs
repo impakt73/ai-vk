@@ -372,6 +372,10 @@ fn substitute_toml_value(
 ) -> Result<(), ComputeGraphError> {
     match value {
         TomlValue::String(raw) => {
+            if let Some(integer) = evaluate_div_align(raw, arguments)? {
+                *value = TomlValue::Integer(integer);
+                return Ok(());
+            }
             let exact_reference = exact_argument_reference(raw);
             let substituted = substitute_string(raw, |name| {
                 arguments.get(name).cloned().ok_or_else(|| {
@@ -399,6 +403,62 @@ fn substitute_toml_value(
         _ => {}
     }
     Ok(())
+}
+
+fn evaluate_div_align(
+    value: &str,
+    arguments: &BTreeMap<String, String>,
+) -> Result<Option<i64>, ComputeGraphError> {
+    let value = value.trim();
+    let Some(operands) = value.strip_prefix("$div_align(") else {
+        return Ok(None);
+    };
+    let Some(operands) = operands.strip_suffix(')') else {
+        return Err(ComputeGraphError::Invalid(
+            "div_align expression must end with `)`".into(),
+        ));
+    };
+    let mut operands = operands.split(',');
+    let dividend = operands
+        .next()
+        .ok_or_else(|| ComputeGraphError::Invalid("div_align requires two operands".into()))?;
+    let divisor = operands
+        .next()
+        .ok_or_else(|| ComputeGraphError::Invalid("div_align requires two operands".into()))?;
+    if operands.next().is_some() {
+        return Err(ComputeGraphError::Invalid(
+            "div_align requires exactly two operands".into(),
+        ));
+    }
+    let dividend = resolve_div_align_operand(dividend, arguments)?;
+    let divisor = resolve_div_align_operand(divisor, arguments)?;
+    if divisor == 0 {
+        return Err(ComputeGraphError::Invalid(
+            "div_align divisor must be non-zero".into(),
+        ));
+    }
+    let aligned = dividend / divisor + u64::from(dividend % divisor != 0);
+    let aligned = i64::try_from(aligned).map_err(|_| {
+        ComputeGraphError::Invalid("div_align result does not fit in a TOML integer".into())
+    })?;
+    Ok(Some(aligned))
+}
+
+fn resolve_div_align_operand(
+    operand: &str,
+    arguments: &BTreeMap<String, String>,
+) -> Result<u64, ComputeGraphError> {
+    let resolved = substitute_string(operand.trim(), |name| {
+        arguments.get(name).cloned().ok_or_else(|| {
+            ComputeGraphError::Invalid(format!("graph argument `{name}` is not declared"))
+        })
+    })?;
+    resolved.trim().parse::<u64>().map_err(|_| {
+        ComputeGraphError::Invalid(format!(
+            "div_align operand `{}` must resolve to a non-negative integer",
+            operand.trim()
+        ))
+    })
 }
 
 fn substitute_string<F>(value: &str, mut resolve: F) -> Result<String, ComputeGraphError>

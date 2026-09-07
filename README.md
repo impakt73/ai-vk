@@ -66,6 +66,14 @@ Every override must name an argument declared by the graph. Argument defaults
 and overrides are strings; references used as numeric TOML values are converted
 to integers before graph validation.
 
+Dispatch dimensions can use `div_align` to divide a value by a thread-group
+dimension and round up, which keeps compute dispatches valid for resolutions
+that are not evenly divisible:
+
+```toml
+dispatch = ["$div_align($width, 8)", 1, 1]
+```
+
 Use `examples/compute_graph.toml` as a starting point for changing resources,
 dispatches, dependencies, and shader paths. The command reports graph parsing,
 shader compilation, Vulkan setup, and execution errors directly.
