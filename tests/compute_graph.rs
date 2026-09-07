@@ -1,4 +1,5 @@
 use std::{
+    collections::BTreeMap,
     fs,
     path::PathBuf,
     sync::atomic::{AtomicUsize, Ordering},
@@ -99,6 +100,52 @@ fn rejects_unknown_resources_and_invalid_dimensions() {
     )
     .expect_err("image outputs without a .png extension should be rejected");
     assert!(invalid_output.to_string().contains(".png extension"));
+}
+
+#[test]
+fn resolves_graph_arguments_in_dimensions_and_dispatches() {
+    let mut overrides = BTreeMap::new();
+    overrides.insert("width".into(), "16".into());
+    let graph = ComputeGraph::from_toml_with_arguments(
+        r#"
+            [arguments]
+            width = "8"
+            height = "4"
+            buffer_size = "64"
+            groups = "2"
+
+            [resources.image]
+            type = "image"
+            extent = ["$width", "${height}"]
+
+            [resources.buffer]
+            type = "buffer"
+            size = "$buffer_size"
+
+            [[nodes]]
+            name = "fill"
+            shader = "fill.hlsl"
+            kernel = "main"
+            dispatch = ["$groups", 1, 1]
+        "#,
+        &overrides,
+    )
+    .expect("graph arguments should resolve");
+
+    assert_eq!(graph.definition().arguments["width"], "16");
+    assert_eq!(graph.definition().arguments["height"], "4");
+    assert_eq!(graph.definition().resources["image"].extent, Some([16, 4]));
+    assert_eq!(graph.definition().resources["buffer"].size, Some(64));
+    assert_eq!(graph.definition().nodes[0].dispatch, [2, 1, 1]);
+}
+
+#[test]
+fn rejects_undeclared_graph_argument_overrides() {
+    let mut overrides = BTreeMap::new();
+    overrides.insert("width".into(), "16".into());
+    let error = ComputeGraph::from_toml_with_arguments("[arguments]\nheight = \"8\"", &overrides)
+        .expect_err("undeclared arguments should be rejected");
+    assert!(error.to_string().contains("has no declaration"));
 }
 
 #[test]

@@ -8,6 +8,7 @@ use std::{
 use ash::{Entry, vk};
 use hassle_rs::compile_hlsl;
 use serde::Deserialize;
+use toml::Value as TomlValue;
 
 use crate::{
     color_subresource_range, create_vulkan_instance, find_memory_type, select_compute_queue,
@@ -219,6 +220,9 @@ pub struct ComputeNodeDefinition {
 /// The directly deserializable form of a compute graph.
 #[derive(Clone, Debug, Deserialize)]
 pub struct ComputeGraphDefinition {
+    /// String arguments declared in the `[arguments]` TOML table.
+    #[serde(default)]
+    pub arguments: BTreeMap<String, String>,
     #[serde(default)]
     pub resources: BTreeMap<String, ResourceDefinition>,
     #[serde(default)]
@@ -275,6 +279,203 @@ impl From<vk::Result> for ComputeGraphError {
     }
 }
 
+fn parse_graph_definition(
+    source: &str,
+    overrides: &BTreeMap<String, String>,
+) -> Result<ComputeGraphDefinition, ComputeGraphError> {
+    let mut document = toml::from_str::<TomlValue>(source)?;
+    let root = document.as_table_mut().ok_or_else(|| {
+        ComputeGraphError::Invalid("compute graph TOML must contain a table".into())
+    })?;
+    let declared = root.remove("arguments").or_else(|| root.remove("args"));
+    let mut arguments = BTreeMap::new();
+    if let Some(declared) = declared {
+        let table = declared.as_table().ok_or_else(|| {
+            ComputeGraphError::Invalid("graph arguments must be declared as a table".into())
+        })?;
+        for (name, value) in table {
+            let value = value.as_str().ok_or_else(|| {
+                ComputeGraphError::Invalid(format!(
+                    "graph argument `{name}` must have a string default value"
+                ))
+            })?;
+            if name.is_empty() {
+                return Err(ComputeGraphError::Invalid(
+                    "graph argument names must not be empty".into(),
+                ));
+            }
+            arguments.insert(name.clone(), value.to_owned());
+        }
+    }
+    for (name, value) in overrides {
+        if !arguments.contains_key(name) {
+            return Err(ComputeGraphError::Invalid(format!(
+                "graph argument override `{name}` has no declaration"
+            )));
+        }
+        arguments.insert(name.clone(), value.clone());
+    }
+    let mut resolved_arguments = BTreeMap::new();
+    for name in arguments.keys() {
+        let mut resolving = BTreeSet::new();
+        let value =
+            resolve_graph_argument(name, &arguments, &mut resolved_arguments, &mut resolving)?;
+        resolved_arguments.insert(name.clone(), value);
+    }
+
+    let root = document
+        .as_table_mut()
+        .expect("TOML root was checked above");
+    let mut root_value = TomlValue::Table(std::mem::take(root));
+    substitute_toml_value(&mut root_value, &resolved_arguments)?;
+    let TomlValue::Table(mut root_value) = root_value else {
+        unreachable!("TOML root was checked above")
+    };
+    let mut argument_table = toml::map::Map::new();
+    for (name, value) in resolved_arguments {
+        argument_table.insert(name, TomlValue::String(value));
+    }
+    root_value.insert("arguments".into(), TomlValue::Table(argument_table));
+    document = TomlValue::Table(root_value);
+    document.try_into().map_err(ComputeGraphError::from)
+}
+
+fn resolve_graph_argument(
+    name: &str,
+    arguments: &BTreeMap<String, String>,
+    resolved: &mut BTreeMap<String, String>,
+    resolving: &mut BTreeSet<String>,
+) -> Result<String, ComputeGraphError> {
+    if let Some(value) = resolved.get(name) {
+        return Ok(value.clone());
+    }
+    if !resolving.insert(name.to_owned()) {
+        return Err(ComputeGraphError::Invalid(format!(
+            "graph arguments contain a reference cycle at `{name}`"
+        )));
+    }
+    let raw = arguments.get(name).ok_or_else(|| {
+        ComputeGraphError::Invalid(format!("graph argument `{name}` is not declared"))
+    })?;
+    let value = substitute_string(raw, |reference| {
+        resolve_graph_argument(reference, arguments, resolved, resolving)
+    })?;
+    resolving.remove(name);
+    resolved.insert(name.to_owned(), value.clone());
+    Ok(value)
+}
+
+fn substitute_toml_value(
+    value: &mut TomlValue,
+    arguments: &BTreeMap<String, String>,
+) -> Result<(), ComputeGraphError> {
+    match value {
+        TomlValue::String(raw) => {
+            let exact_reference = exact_argument_reference(raw);
+            let substituted = substitute_string(raw, |name| {
+                arguments.get(name).cloned().ok_or_else(|| {
+                    ComputeGraphError::Invalid(format!("graph argument `{name}` is not declared"))
+                })
+            })?;
+            if exact_reference.is_some() {
+                if let Ok(integer) = substituted.parse::<i64>() {
+                    *value = TomlValue::Integer(integer);
+                    return Ok(());
+                }
+            }
+            *raw = substituted;
+        }
+        TomlValue::Array(values) => {
+            for value in values {
+                substitute_toml_value(value, arguments)?;
+            }
+        }
+        TomlValue::Table(values) => {
+            for (_, value) in values.iter_mut() {
+                substitute_toml_value(value, arguments)?;
+            }
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+fn substitute_string<F>(value: &str, mut resolve: F) -> Result<String, ComputeGraphError>
+where
+    F: FnMut(&str) -> Result<String, ComputeGraphError>,
+{
+    let characters: Vec<char> = value.chars().collect();
+    let mut result = String::with_capacity(value.len());
+    let mut index = 0;
+    while index < characters.len() {
+        if characters[index] != '$' {
+            result.push(characters[index]);
+            index += 1;
+            continue;
+        }
+        let (name, next_index) = if characters.get(index + 1) == Some(&'{') {
+            let end = characters[index + 2..]
+                .iter()
+                .position(|character| *character == '}')
+                .map(|offset| index + 2 + offset)
+                .ok_or_else(|| {
+                    ComputeGraphError::Invalid("unterminated graph argument reference".into())
+                })?;
+            if end == index + 2 {
+                return Err(ComputeGraphError::Invalid(
+                    "graph argument reference has an empty name".into(),
+                ));
+            }
+            (
+                characters[index + 2..end].iter().collect::<String>(),
+                end + 1,
+            )
+        } else if characters
+            .get(index + 1)
+            .is_some_and(|character| is_argument_name_start(*character))
+        {
+            let mut end = index + 2;
+            while characters
+                .get(end)
+                .is_some_and(|character| is_argument_name_character(*character))
+            {
+                end += 1;
+            }
+            (characters[index + 1..end].iter().collect::<String>(), end)
+        } else {
+            result.push('$');
+            index += 1;
+            continue;
+        };
+        result.push_str(&resolve(&name)?);
+        index = next_index;
+    }
+    Ok(result)
+}
+
+fn exact_argument_reference(value: &str) -> Option<&str> {
+    if value.starts_with("${") && value.ends_with('}') && value.len() > 3 {
+        return Some(&value[2..value.len() - 1]);
+    }
+    if value.starts_with('$') && value.len() > 1 {
+        let name = &value[1..];
+        if name.chars().all(is_argument_name_character)
+            && name.chars().next().is_some_and(is_argument_name_start)
+        {
+            return Some(name);
+        }
+    }
+    None
+}
+
+fn is_argument_name_start(character: char) -> bool {
+    character.is_ascii_alphabetic() || character == '_'
+}
+
+fn is_argument_name_character(character: char) -> bool {
+    is_argument_name_start(character) || character.is_ascii_digit() || character == '-'
+}
+
 #[derive(Clone, Debug)]
 struct DependencyGraph {
     prerequisites: Vec<Vec<usize>>,
@@ -293,23 +494,48 @@ impl ComputeGraph {
     /// Parses and validates a graph. Shader files are resolved relative to the
     /// current working directory when this constructor is used.
     pub fn from_toml(source: &str) -> Result<Self, ComputeGraphError> {
-        Self::from_toml_with_base(source, PathBuf::from("."))
+        Self::from_toml_with_arguments(source, &BTreeMap::new())
+    }
+
+    /// Parses a graph and applies command-line-style argument overrides.
+    ///
+    /// Argument references use either `$name` or `${name}` syntax. Values are
+    /// substituted before the graph is deserialized, so references can be used
+    /// anywhere a numeric TOML value is accepted, including resource extents,
+    /// buffer sizes, and node dispatch dimensions.
+    pub fn from_toml_with_arguments(
+        source: &str,
+        overrides: &BTreeMap<String, String>,
+    ) -> Result<Self, ComputeGraphError> {
+        Self::from_toml_with_base_and_arguments(source, PathBuf::from("."), overrides)
     }
 
     /// Loads and validates a graph file. Relative shader paths are resolved
     /// relative to the TOML file.
     pub fn from_toml_file(path: impl AsRef<Path>) -> Result<Self, ComputeGraphError> {
+        Self::from_toml_file_with_arguments(path, &BTreeMap::new())
+    }
+
+    /// Loads a graph file and applies command-line-style argument overrides.
+    pub fn from_toml_file_with_arguments(
+        path: impl AsRef<Path>,
+        overrides: &BTreeMap<String, String>,
+    ) -> Result<Self, ComputeGraphError> {
         let path = path.as_ref();
         let source = fs::read_to_string(path)?;
         let base_dir = path
             .parent()
             .unwrap_or_else(|| Path::new("."))
             .to_path_buf();
-        Self::from_toml_with_base(&source, base_dir)
+        Self::from_toml_with_base_and_arguments(&source, base_dir, overrides)
     }
 
-    fn from_toml_with_base(source: &str, base_dir: PathBuf) -> Result<Self, ComputeGraphError> {
-        let definition = toml::from_str::<ComputeGraphDefinition>(source)?;
+    fn from_toml_with_base_and_arguments(
+        source: &str,
+        base_dir: PathBuf,
+        overrides: &BTreeMap<String, String>,
+    ) -> Result<Self, ComputeGraphError> {
+        let definition = parse_graph_definition(source, overrides)?;
         Self::from_definition_with_base(definition, base_dir)
     }
 

@@ -1,13 +1,18 @@
 # Run from the repository root with:
 # cargo run -- run-graph examples/compute_graph.toml
+# cargo run -- run-graph examples/compute_graph.toml --arg width=16 --arg height=16
+
+[arguments]
+width = "8"
+height = "8"
 
 [resources.source]
 type = "image"
-extent = [8, 8]
+extent = ["$width", "$height"]
 
 [resources.output]
 type = "image"
-extent = [8, 8]
+extent = ["$width", "$height"]
 output = "compute_graph_output.png"
 
 [[nodes]]

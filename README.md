@@ -36,6 +36,36 @@ subcommand to enable it for image creation, graph execution, or device listing:
 cargo run -- --validation-layers run-graph examples/compute_graph.toml
 ```
 
+Graphs can declare string arguments with defaults. Use `$name` or `${name}`
+inside resource extents, buffer sizes, and dispatch dimensions. CLI values use
+Docker-style `NAME=VALUE` overrides and may be specified more than once:
+
+```toml
+[arguments]
+width = "512"
+height = "512"
+groups_x = "64"
+
+[resources.image]
+type = "image"
+extent = ["$width", "${height}"]
+
+[[nodes]]
+name = "process"
+shader = "process.hlsl"
+kernel = "main"
+dispatch = ["$groups_x", 64, 1]
+```
+
+```text
+cargo run -- run-graph examples/compute_graph.toml \
+  --arg width=1024 --arg height=768
+```
+
+Every override must name an argument declared by the graph. Argument defaults
+and overrides are strings; references used as numeric TOML values are converted
+to integers before graph validation.
+
 Use `examples/compute_graph.toml` as a starting point for changing resources,
 dispatches, dependencies, and shader paths. The command reports graph parsing,
 shader compilation, Vulkan setup, and execution errors directly.

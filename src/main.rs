@@ -1,4 +1,7 @@
-use std::path::{Path, PathBuf};
+use std::{
+    collections::BTreeMap,
+    path::{Path, PathBuf},
+};
 
 use ai_vk::{ComputeGraph, enumerate_physical_devices_with_validation_layers};
 use clap::{Parser, Subcommand};
@@ -19,6 +22,14 @@ enum Command {
     RunGraph {
         /// Compute graph TOML file.
         graph: PathBuf,
+        /// Override a declared graph argument using NAME=VALUE.
+        #[arg(
+            long = "arg",
+            alias = "argument",
+            alias = "build-arg",
+            value_name = "NAME=VALUE"
+        )]
+        arguments: Vec<String>,
     },
 }
 
@@ -32,7 +43,9 @@ fn main() {
 fn run() -> Result<(), Box<dyn std::error::Error>> {
     let cli = Cli::parse();
     match cli.command {
-        Some(Command::RunGraph { graph }) => run_graph(&graph, cli.validation_layers),
+        Some(Command::RunGraph { graph, arguments }) => {
+            run_graph(&graph, cli.validation_layers, &arguments)
+        }
         None => list_physical_devices(cli.validation_layers),
     }
 }
@@ -40,8 +53,10 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
 fn run_graph(
     path: &Path,
     enable_validation_layers: bool,
+    raw_arguments: &[String],
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let graph = ComputeGraph::from_toml_file(path)?;
+    let arguments = parse_arguments(raw_arguments)?;
+    let graph = ComputeGraph::from_toml_file_with_arguments(path, &arguments)?;
     let node_count = graph.definition().nodes.len();
     let resource_count = graph.definition().resources.len();
     graph.execute_with_validation_layers(enable_validation_layers)?;
@@ -52,6 +67,27 @@ fn run_graph(
         resource_count
     );
     Ok(())
+}
+
+fn parse_arguments(raw_arguments: &[String]) -> Result<BTreeMap<String, String>, String> {
+    let mut arguments = BTreeMap::new();
+    for raw in raw_arguments {
+        let Some((name, value)) = raw.split_once('=') else {
+            return Err(format!("graph argument `{raw}` must use NAME=VALUE syntax"));
+        };
+        if name.is_empty() {
+            return Err("graph argument names must not be empty".into());
+        }
+        if arguments
+            .insert(name.to_owned(), value.to_owned())
+            .is_some()
+        {
+            return Err(format!(
+                "graph argument `{name}` was specified more than once"
+            ));
+        }
+    }
+    Ok(arguments)
 }
 
 fn list_physical_devices(enable_validation_layers: bool) -> Result<(), Box<dyn std::error::Error>> {
