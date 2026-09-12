@@ -1,6 +1,6 @@
 # Run from the repository root with:
-# cargo run -- run-graph graphs/upsampling/sdf_bilinear_upsample.toml
-# cargo run -- run-graph graphs/upsampling/sdf_bilinear_upsample.toml \
+# cargo run -- run-graph examples/upsampling/sdf_bilinear_upsample.toml
+# cargo run -- run-graph examples/upsampling/sdf_bilinear_upsample.toml \
 #     --arg source_width=24 --arg source_height=16 \
 #     --arg output_width=48 --arg output_height=32
 

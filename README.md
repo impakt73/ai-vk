@@ -78,6 +78,19 @@ Use `examples/compute_graph.toml` as a starting point for changing resources,
 dispatches, dependencies, and shader paths. The command reports graph parsing,
 shader compilation, Vulkan setup, and execution errors directly.
 
+A larger example lives in `examples/upsampling/`. It raymarches an animated
+signed-distance scene at low resolution into color, normal, motion vector, and
+depth buffers, then bilinearly upsamples all four into PNG outputs:
+
+```text
+cargo run -- run-graph examples/upsampling/sdf_bilinear_upsample.toml
+```
+
+The checked-in graph and shaders are also exercised by
+`tests/sdf_bilinear_upsample.rs`, which loads the same TOML through the public
+`ComputeGraph` API. That keeps the example reusable from the CLI while the
+integration test verifies the color, normal, motion, and depth results.
+
 After execution, the CLI reports the GPU timestamp duration for the graph. For
 example:
 
