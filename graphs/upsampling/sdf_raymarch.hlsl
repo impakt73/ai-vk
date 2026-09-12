@@ -89,13 +89,15 @@ void main(uint3 dispatch_thread_id : SV_DispatchThreadID)
     float3 ray_direction = normalize(float3(uv.x, -uv.y, -2.2));
     float distance;
     float3 color = float3(0.015, 0.02, 0.04) + float3(0.02, 0.03, 0.06) * (1.0 - uv.y);
+    float3 normal = float3(0.0, 0.0, 1.0);
     if (raymarch(camera, ray_direction, distance))
     {
         float3 position = camera + ray_direction * distance;
-        float3 normal = scene_normal(position);
+        normal = scene_normal(position);
         color = phong(position, normal, ray_direction, scene_material(position));
     }
 
     color = pow(saturate(color), 1.0 / 2.2);
     bindless_images[compute_graph.slots[0]][dispatch_thread_id.xy] = float4(color, 1.0);
+    bindless_images[compute_graph.slots[1]][dispatch_thread_id.xy] = float4(normal * 0.5 + 0.5, 1.0);
 }

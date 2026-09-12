@@ -14,17 +14,29 @@ output_height = "32"
 type = "image"
 extent = ["$source_width", "$source_height"]
 
+[resources.source_normal]
+type = "image"
+extent = ["$source_width", "$source_height"]
+
 [resources.output]
 type = "image"
 extent = ["$output_width", "$output_height"]
 output = "sdf_bilinear_upsampled.png"
+
+[resources.output_normal]
+type = "image"
+extent = ["$output_width", "$output_height"]
+output = "sdf_bilinear_upsampled_normal.png"
 
 [[nodes]]
 name = "raymarch"
 shader = "sdf_raymarch.hlsl"
 kernel = "main"
 dispatch = ["$div_align($source_width, 8)", "$div_align($source_height, 8)", 1]
-bindings = [{ resource = "source", access = "write" }]
+bindings = [
+    { resource = "source", access = "write" },
+    { resource = "source_normal", access = "write" },
+]
 
 [[nodes]]
 name = "bilinear-upsample"
@@ -33,5 +45,7 @@ kernel = "main"
 dispatch = ["$div_align($output_width, 8)", "$div_align($output_height, 8)", 1]
 bindings = [
     { resource = "source", access = "read" },
+    { resource = "source_normal", access = "read" },
     { resource = "output", access = "write" },
+    { resource = "output_normal", access = "write" },
 ]
