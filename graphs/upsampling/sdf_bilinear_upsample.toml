@@ -18,6 +18,14 @@ extent = ["$source_width", "$source_height"]
 type = "image"
 extent = ["$source_width", "$source_height"]
 
+[resources.source_motion]
+type = "image"
+extent = ["$source_width", "$source_height"]
+
+[resources.source_depth]
+type = "image"
+extent = ["$source_width", "$source_height"]
+
 [resources.output]
 type = "image"
 extent = ["$output_width", "$output_height"]
@@ -28,6 +36,16 @@ type = "image"
 extent = ["$output_width", "$output_height"]
 output = "sdf_bilinear_upsampled_normal.png"
 
+[resources.output_motion]
+type = "image"
+extent = ["$output_width", "$output_height"]
+output = "sdf_bilinear_upsampled_motion.png"
+
+[resources.output_depth]
+type = "image"
+extent = ["$output_width", "$output_height"]
+output = "sdf_bilinear_upsampled_depth.png"
+
 [[nodes]]
 name = "raymarch"
 shader = "sdf_raymarch.hlsl"
@@ -36,6 +54,8 @@ dispatch = ["$div_align($source_width, 8)", "$div_align($source_height, 8)", 1]
 bindings = [
     { resource = "source", access = "write" },
     { resource = "source_normal", access = "write" },
+    { resource = "source_motion", access = "write" },
+    { resource = "source_depth", access = "write" },
 ]
 
 [[nodes]]
@@ -46,6 +66,10 @@ dispatch = ["$div_align($output_width, 8)", "$div_align($output_height, 8)", 1]
 bindings = [
     { resource = "source", access = "read" },
     { resource = "source_normal", access = "read" },
+    { resource = "source_motion", access = "read" },
+    { resource = "source_depth", access = "read" },
     { resource = "output", access = "write" },
     { resource = "output_normal", access = "write" },
+    { resource = "output_motion", access = "write" },
+    { resource = "output_depth", access = "write" },
 ]

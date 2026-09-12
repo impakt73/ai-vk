@@ -5,7 +5,7 @@ void main(uint3 dispatch_thread_id : SV_DispatchThreadID)
 {
     uint width;
     uint height;
-    bindless_images[compute_graph.slots[2]].GetDimensions(width, height);
+    bindless_images[compute_graph.slots[4]].GetDimensions(width, height);
     if (dispatch_thread_id.x >= width || dispatch_thread_id.y >= height)
     {
         return;
@@ -16,6 +16,12 @@ void main(uint3 dispatch_thread_id : SV_DispatchThreadID)
         compute_graph.slots[0]].SampleLevel(bindless_sampler, uv, 0.0);
     float4 normal = bindless_textures[
         compute_graph.slots[1]].SampleLevel(bindless_sampler, uv, 0.0);
-    bindless_images[compute_graph.slots[2]][dispatch_thread_id.xy] = color;
-    bindless_images[compute_graph.slots[3]][dispatch_thread_id.xy] = normal;
+    float4 motion = bindless_textures[
+        compute_graph.slots[2]].SampleLevel(bindless_sampler, uv, 0.0);
+    float4 depth = bindless_textures[
+        compute_graph.slots[3]].SampleLevel(bindless_sampler, uv, 0.0);
+    bindless_images[compute_graph.slots[4]][dispatch_thread_id.xy] = color;
+    bindless_images[compute_graph.slots[5]][dispatch_thread_id.xy] = normal;
+    bindless_images[compute_graph.slots[6]][dispatch_thread_id.xy] = motion;
+    bindless_images[compute_graph.slots[7]][dispatch_thread_id.xy] = depth;
 }
