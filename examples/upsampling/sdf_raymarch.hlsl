@@ -132,8 +132,11 @@ float3 phong(float3 position, float3 normal, float3 ray_direction, int material)
 [numthreads(8, 8, 1)]
 void main(uint3 dispatch_thread_id : SV_DispatchThreadID)
 {
-    float current_time = asfloat(bindless_buffers[compute_graph.slots[0]][0]);
-    float previous_time = asfloat(bindless_buffers[compute_graph.slots[0]][1]);
+    float base_current_time = asfloat(bindless_buffers[compute_graph.slots[0]][0]);
+    float base_previous_time = asfloat(bindless_buffers[compute_graph.slots[0]][1]);
+    float frame_delta = base_current_time - base_previous_time;
+    float current_time = base_current_time + float(compute_graph.frame_index) * frame_delta;
+    float previous_time = current_time - frame_delta;
     uint width;
     uint height;
     bindless_images[compute_graph.slots[1]].GetDimensions(width, height);

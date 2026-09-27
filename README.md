@@ -88,16 +88,24 @@ shader compilation, Vulkan setup, and execution errors directly.
 
 A larger example lives in `examples/upsampling/`. It raymarches an animated
 signed-distance scene at low resolution into color, normal, motion vector, and
-depth buffers, then bilinearly upsamples all four into PNG outputs:
+depth buffers, then temporally reprojects depth while upsampling the outputs.
+The temporal validity image marks accepted history in green and rejected
+history in red. Frame zero is all red because no prior frame is available.
 
 ```text
-cargo run -- run-graph examples/upsampling/sdf_bilinear_upsample.toml
+cargo run -- run-graph examples/upsampling/sdf_bilinear_upsample.toml --frames 2
 ```
+
+The depth threshold defaults to `0.01` in normalized depth units and can be
+overridden, for example with `--arg depth_threshold=0.02`. The graph writes
+frame-indexed PNGs for each upsampled output and the temporal validity image.
 
 The checked-in graph and shaders are also exercised by
 `tests/sdf_bilinear_upsample.rs`, which loads the same TOML through the public
 `ComputeGraph` API. That keeps the example reusable from the CLI while the
-integration test verifies the color, normal, motion, and depth results.
+integration test verifies the first-frame color, normal, motion, and depth
+results, then compares the second-frame temporal validity output against a gold
+image and checks its binary red/green values.
 
 After execution, the CLI reports the total GPU timestamp duration for all
 frames and, for multi-frame runs, each frame's duration. For example:
@@ -173,8 +181,9 @@ bindings = [{ resource = "source", access = "write" }]
 ```
 
 Graph shaders should include `shaders/compute_graph.hlsl`. Each dispatch gets a
-68-byte push-constant table containing `compute_graph.slots[]` and the current
-`compute_graph.frame_index`. A slot indexes `bindless_images[]` or
+72-byte push-constant table containing `compute_graph.slots[]`, the current
+`compute_graph.frame_index`, and the node's scalar `compute_graph.parameter`
+(defaulting to zero). A slot indexes `bindless_images[]` or
 `bindless_buffers[]` depending on the resource type. Image sampling is available
 through `bindless_textures[]` from the same include.
 

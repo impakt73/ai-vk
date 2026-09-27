@@ -9,6 +9,7 @@ struct ComputeGraphPushConstants
 {
     uint slots[16];
     uint frame_index;
+    float parameter;
 };
 
 [[vk::push_constant]]

@@ -223,6 +223,25 @@ pub struct ComputeNodeDefinition {
     pub dispatch: [u32; 3],
     #[serde(default)]
     pub bindings: Vec<ResourceBindingDefinition>,
+    #[serde(default, deserialize_with = "deserialize_f32")]
+    pub parameter: f32,
+}
+
+fn deserialize_f32<'de, D>(deserializer: D) -> Result<f32, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum NumberOrString {
+        Number(f32),
+        String(String),
+    }
+
+    match NumberOrString::deserialize(deserializer)? {
+        NumberOrString::Number(value) => Ok(value),
+        NumberOrString::String(value) => value.parse().map_err(serde::de::Error::custom),
+    }
 }
 
 /// The directly deserializable form of a compute graph.
@@ -990,6 +1009,7 @@ impl ComputeGraphExecution {
 struct ResourceTablePushConstants {
     slots: [u32; RESOURCE_TABLE_CAPACITY],
     frame_index: u32,
+    parameter: f32,
 }
 
 struct GraphImage {
@@ -1639,6 +1659,7 @@ impl GraphRuntime {
                 let mut table = ResourceTablePushConstants {
                     slots: [0; RESOURCE_TABLE_CAPACITY],
                     frame_index: shader_frame_index,
+                    parameter: node.parameter,
                 };
                 if node.bindings.len() > RESOURCE_TABLE_CAPACITY {
                     return Err(ComputeGraphError::Invalid(format!(

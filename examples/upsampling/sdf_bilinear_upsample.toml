@@ -1,5 +1,5 @@
 # Run from the repository root with:
-# cargo run -- run-graph examples/upsampling/sdf_bilinear_upsample.toml
+# cargo run -- run-graph examples/upsampling/sdf_bilinear_upsample.toml --frames 2
 # cargo run -- run-graph examples/upsampling/sdf_bilinear_upsample.toml \
 #     --arg source_width=24 --arg source_height=16 \
 #     --arg output_width=48 --arg output_height=32
@@ -9,6 +9,7 @@ source_width = "24"
 source_height = "16"
 output_width = "48"
 output_height = "32"
+depth_threshold = "0.01"
 
 [resources.source]
 type = "image"
@@ -33,22 +34,28 @@ input = "time.bin"
 [resources.output]
 type = "image"
 extent = ["$output_width", "$output_height"]
-output = "sdf_bilinear_upsampled.png"
+output = "sdf_bilinear_upsampled-{frame}.png"
 
 [resources.output_normal]
 type = "image"
 extent = ["$output_width", "$output_height"]
-output = "sdf_bilinear_upsampled_normal.png"
+output = "sdf_bilinear_upsampled_normal-{frame}.png"
 
 [resources.output_motion]
 type = "image"
 extent = ["$output_width", "$output_height"]
-output = "sdf_bilinear_upsampled_motion.png"
+output = "sdf_bilinear_upsampled_motion-{frame}.png"
 
 [resources.output_depth]
 type = "image"
 extent = ["$output_width", "$output_height"]
-output = "sdf_bilinear_upsampled_depth.png"
+history = 2
+output = "sdf_bilinear_upsampled_depth-{frame}.png"
+
+[resources.temporal_validity]
+type = "image"
+extent = ["$output_width", "$output_height"]
+output = "sdf_bilinear_temporal_validity-{frame}.png"
 
 [[nodes]]
 name = "raymarch"
@@ -64,17 +71,20 @@ bindings = [
 ]
 
 [[nodes]]
-name = "bilinear-upsample"
-shader = "bilinear_upsample.hlsl"
+name = "temporal-upscale"
+shader = "temporal_upscale.hlsl"
 kernel = "main"
 dispatch = ["$div_align($output_width, 8)", "$div_align($output_height, 8)", 1]
+parameter = "$depth_threshold"
 bindings = [
     { resource = "source", access = "read" },
     { resource = "source_normal", access = "read" },
     { resource = "source_motion", access = "read" },
     { resource = "source_depth", access = "read" },
+    { resource = "output_depth", frame_offset = -1, access = "read" },
     { resource = "output", access = "write" },
     { resource = "output_normal", access = "write" },
     { resource = "output_motion", access = "write" },
     { resource = "output_depth", access = "write" },
+    { resource = "temporal_validity", access = "write" },
 ]
