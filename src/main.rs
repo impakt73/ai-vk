@@ -31,6 +31,9 @@ enum Command {
             value_name = "NAME=VALUE"
         )]
         arguments: Vec<String>,
+        /// Number of times to execute the graph while retaining its resources.
+        #[arg(long, default_value_t = 1)]
+        frames: usize,
     },
 }
 
@@ -44,9 +47,11 @@ fn main() {
 fn run() -> Result<(), Box<dyn std::error::Error>> {
     let cli = Cli::parse();
     match cli.command {
-        Some(Command::RunGraph { graph, arguments }) => {
-            run_graph(&graph, cli.validation_layers, &arguments)
-        }
+        Some(Command::RunGraph {
+            graph,
+            arguments,
+            frames,
+        }) => run_graph(&graph, cli.validation_layers, &arguments, frames),
         None => list_physical_devices(cli.validation_layers),
     }
 }
@@ -55,18 +60,34 @@ fn run_graph(
     path: &Path,
     enable_validation_layers: bool,
     raw_arguments: &[String],
+    frame_count: usize,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let arguments = parse_arguments(raw_arguments)?;
     let graph = ComputeGraph::from_toml_file_with_arguments(path, &arguments)?;
     let node_count = graph.definition().nodes.len();
     let resource_count = graph.definition().resources.len();
-    let execution = graph.execute_with_validation_layers(enable_validation_layers)?;
+    let execution =
+        graph.execute_frames_with_validation_layers(frame_count, enable_validation_layers)?;
+    let frame_label = if frame_count == 1 { "frame" } else { "frames" };
     println!(
-        "executed compute graph {} ({} nodes, {} resources)",
+        "executed compute graph {} ({} nodes, {} resources, {} {})",
         path.display(),
         node_count,
-        resource_count
+        resource_count,
+        frame_count,
+        frame_label,
     );
+    if frame_count > 1 {
+        for (frame, duration) in execution.frame_gpu_execution_times().iter().enumerate() {
+            match duration {
+                Some(duration) => println!(
+                    "frame {frame} GPU execution time: {}",
+                    format_duration(*duration)
+                ),
+                None => println!("frame {frame} GPU execution time: unavailable"),
+            }
+        }
+    }
     match execution.gpu_execution_time() {
         Some(duration) => println!("GPU execution time: {}", format_duration(duration)),
         None => println!("GPU execution time: unavailable"),

@@ -18,3 +18,17 @@ The title should describe the primary outcome of the commit in imperative
 language when practical. Keep the body focused on the intent and meaningful
 effects of the complete change, not a file-by-file inventory. Before creating
 the commit, verify the title length, blank-line separation, and body wrapping.
+
+# Rust Quality Checks
+
+Before considering Rust work complete, agents must run the formatter and
+Clippy, fix any issues they report, and rerun both checks until clean:
+
+```text
+cargo fmt --all
+cargo clippy --all-targets -- -D warnings
+cargo fmt --all -- --check
+```
+
+Run the relevant tests as well, and do not report completion while any required
+check or test is failing.

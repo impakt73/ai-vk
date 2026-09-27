@@ -1,0 +1,22 @@
+# Execute four frames from the repository root with:
+# cargo run -- run-graph examples/temporal/temporal_accumulation.toml --frames 4
+
+[arguments]
+output_pattern = "frames/accumulation-{frame}.png"
+
+[resources.accumulation]
+type = "image"
+extent = [8, 8]
+format = "rgba32_float"
+history = 2
+output = "$output_pattern"
+
+[[nodes]]
+name = "accumulate"
+shader = "temporal_accumulation.hlsl"
+kernel = "main"
+dispatch = [1, 1, 1]
+bindings = [
+    { resource = "accumulation", frame_offset = -1, access = "read" },
+    { resource = "accumulation", frame_offset = 0, access = "write" },
+]

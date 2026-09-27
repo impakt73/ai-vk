@@ -185,6 +185,9 @@ pub struct ResourceDefinition {
     pub extent: Option<[u32; 2]>,
     #[serde(default)]
     pub size: Option<u64>,
+    /// Number of physical versions retained for frame-relative bindings.
+    #[serde(default)]
+    pub history: Option<u32>,
     /// Optional input path, resolved relative to the graph TOML file.
     #[serde(default)]
     pub input: Option<PathBuf>,
@@ -203,6 +206,10 @@ pub struct ResourceBindingDefinition {
     pub resource: String,
     #[serde(alias = "usage", alias = "mode")]
     pub access: AccessType,
+    /// Selects a resource version relative to the current graph frame.
+    /// Zero is the current frame; negative values refer to prior frames.
+    #[serde(default)]
+    pub frame_offset: i32,
 }
 
 /// A compute dispatch declared in `[[nodes]]`.
@@ -382,11 +389,11 @@ fn substitute_toml_value(
                     ComputeGraphError::Invalid(format!("graph argument `{name}` is not declared"))
                 })
             })?;
-            if exact_reference.is_some() {
-                if let Ok(integer) = substituted.parse::<i64>() {
-                    *value = TomlValue::Integer(integer);
-                    return Ok(());
-                }
+            if exact_reference.is_some()
+                && let Ok(integer) = substituted.parse::<i64>()
+            {
+                *value = TomlValue::Integer(integer);
+                return Ok(());
             }
             *raw = substituted;
         }
@@ -547,7 +554,7 @@ struct DependencyGraph {
 pub struct ComputeGraph {
     definition: ComputeGraphDefinition,
     base_dir: PathBuf,
-    slots: BTreeMap<String, u32>,
+    slots: BTreeMap<String, Vec<u32>>,
     dependencies: DependencyGraph,
 }
 
@@ -605,13 +612,24 @@ impl ComputeGraph {
         base_dir: PathBuf,
     ) -> Result<Self, ComputeGraphError> {
         let mut slots = BTreeMap::new();
-        for (index, name) in definition.resources.keys().enumerate() {
-            if index >= MAX_RESOURCES {
+        let mut slot_count = 0_usize;
+        for (name, resource) in &definition.resources {
+            let history = resource.history.unwrap_or(1);
+            if history == 0 {
+                return Err(ComputeGraphError::Invalid(format!(
+                    "resource `{name}` history must be non-zero"
+                )));
+            }
+            let end = slot_count.checked_add(history as usize).ok_or_else(|| {
+                ComputeGraphError::Invalid("compute graph resource count overflowed".into())
+            })?;
+            if end > MAX_RESOURCES {
                 return Err(ComputeGraphError::Invalid(format!(
                     "compute graph declares more than {MAX_RESOURCES} resources"
                 )));
             }
-            slots.insert(name.clone(), index as u32);
+            slots.insert(name.clone(), (slot_count as u32..end as u32).collect());
+            slot_count = end;
         }
 
         for (name, resource) in &definition.resources {
@@ -721,37 +739,66 @@ impl ComputeGraph {
                         node.name, binding.resource
                     ))
                 })?;
-                if !bound.insert(binding.resource.clone()) {
+                if binding.frame_offset > 0 {
                     return Err(ComputeGraphError::Invalid(format!(
-                        "node `{}` binds resource `{}` more than once",
-                        node.name, binding.resource
+                        "node `{}` refers to future frame {} of resource `{}`",
+                        node.name, binding.frame_offset, binding.resource
                     )));
                 }
-                if binding.access.reads() {
-                    if let Some(writer) = last_writer.get(&binding.resource) {
-                        prerequisites[node_index].push(*writer);
-                    }
-                    readers
-                        .entry(binding.resource.clone())
-                        .or_default()
-                        .insert(node_index);
+                if binding.frame_offset < 0 && binding.access.writes() {
+                    return Err(ComputeGraphError::Invalid(format!(
+                        "node `{}` may not write historical frame {} of resource `{}`",
+                        node.name, binding.frame_offset, binding.resource
+                    )));
                 }
-                if binding.access.writes() {
-                    if let Some(writer) = last_writer.get(&binding.resource) {
-                        prerequisites[node_index].push(*writer);
-                    }
-                    if let Some(previous_readers) = readers.get(&binding.resource) {
-                        prerequisites[node_index].extend(
-                            previous_readers
-                                .iter()
-                                .copied()
-                                .filter(|reader| *reader != node_index),
-                        );
-                    }
-                    readers.remove(&binding.resource);
-                    last_writer.insert(binding.resource.clone(), node_index);
+                let history = resource.history.unwrap_or(1);
+                let required_history = binding
+                    .frame_offset
+                    .checked_neg()
+                    .and_then(|offset| u32::try_from(offset).ok())
+                    .and_then(|offset| offset.checked_add(1))
+                    .unwrap_or(u32::MAX);
+                if required_history > history {
+                    return Err(ComputeGraphError::Invalid(format!(
+                        "node `{}` refers to frame {} of resource `{}`, which requires history of at least {}",
+                        node.name, binding.frame_offset, binding.resource, required_history
+                    )));
                 }
-                let _ = resource;
+                if !bound.insert((binding.resource.clone(), binding.frame_offset)) {
+                    return Err(ComputeGraphError::Invalid(format!(
+                        "node `{}` binds resource `{}` at frame offset {} more than once",
+                        node.name, binding.resource, binding.frame_offset
+                    )));
+                }
+                // Historical versions are read-only inputs to this frame. Their
+                // producer is the preceding frame's graph execution, not a node
+                // in the current frame's dependency DAG.
+                if binding.frame_offset == 0 {
+                    if binding.access.reads() {
+                        if let Some(writer) = last_writer.get(&binding.resource) {
+                            prerequisites[node_index].push(*writer);
+                        }
+                        readers
+                            .entry(binding.resource.clone())
+                            .or_default()
+                            .insert(node_index);
+                    }
+                    if binding.access.writes() {
+                        if let Some(writer) = last_writer.get(&binding.resource) {
+                            prerequisites[node_index].push(*writer);
+                        }
+                        if let Some(previous_readers) = readers.get(&binding.resource) {
+                            prerequisites[node_index].extend(
+                                previous_readers
+                                    .iter()
+                                    .copied()
+                                    .filter(|reader| *reader != node_index),
+                            );
+                        }
+                        readers.remove(&binding.resource);
+                        last_writer.insert(binding.resource.clone(), node_index);
+                    }
+                }
             }
             if node.bindings.len() > RESOURCE_TABLE_CAPACITY {
                 return Err(ComputeGraphError::Invalid(format!(
@@ -776,7 +823,10 @@ impl ComputeGraph {
     }
 
     pub fn resource_slot(&self, name: &str) -> Option<u32> {
-        self.slots.get(name).copied()
+        self.slots
+            .get(name)
+            .and_then(|slots| slots.first())
+            .copied()
     }
 
     pub fn dependencies(&self, node: usize) -> Option<&[usize]> {
@@ -793,13 +843,64 @@ impl ComputeGraph {
         &self,
         enable_validation_layers: bool,
     ) -> Result<ComputeGraphExecution, ComputeGraphError> {
+        self.execute_frames_with_validation_layers(1, enable_validation_layers)
+    }
+
+    /// Executes the graph repeatedly while retaining its GPU resources between
+    /// frames. Outputs containing `{frame}` are written once per frame.
+    pub fn execute_frames(
+        &self,
+        frame_count: usize,
+    ) -> Result<ComputeGraphExecution, ComputeGraphError> {
+        self.execute_frames_with_validation_layers(frame_count, false)
+    }
+
+    pub fn execute_frames_with_validation_layers(
+        &self,
+        frame_count: usize,
+        enable_validation_layers: bool,
+    ) -> Result<ComputeGraphExecution, ComputeGraphError> {
+        if frame_count == 0 {
+            return Err(ComputeGraphError::Invalid(
+                "compute graph frame count must be non-zero".into(),
+            ));
+        }
+        if u32::try_from(frame_count - 1).is_err() {
+            return Err(ComputeGraphError::Invalid(
+                "frame count exceeds the shader frame-index range".into(),
+            ));
+        }
+        if frame_count > 1 {
+            for (name, resource) in &self.definition.resources {
+                if let Some(output) = &resource.output
+                    && !output.to_string_lossy().contains("{frame}")
+                {
+                    return Err(ComputeGraphError::Invalid(format!(
+                        "resource `{name}` output path `{}` must contain `{{frame}}` when executing multiple frames",
+                        output.display()
+                    )));
+                }
+            }
+        }
         let mut runtime = GraphRuntime::new(self, enable_validation_layers)?;
-        let gpu_execution_time = runtime.execute(self)?;
-        let mut execution = ComputeGraphExecution {
+        let mut frame_gpu_execution_times = Vec::with_capacity(frame_count);
+        for frame_index in 0..frame_count {
+            let gpu_execution_time = runtime.execute(self, frame_index)?;
+            frame_gpu_execution_times.push(gpu_execution_time);
+            ComputeGraphExecution::write_outputs(&mut runtime, self, frame_index)?;
+        }
+        let gpu_execution_time = frame_gpu_execution_times
+            .iter()
+            .try_fold(Duration::ZERO, |total, elapsed| {
+                elapsed.map(|elapsed| total + elapsed)
+            });
+        let execution = ComputeGraphExecution {
             runtime,
             gpu_execution_time,
+            frame_gpu_execution_times,
         };
-        execution.write_outputs(self)?;
+        // The final frame was already dumped above; this wrapper now exposes
+        // the final resource state through the existing readback API.
         Ok(execution)
     }
 }
@@ -808,6 +909,7 @@ impl ComputeGraph {
 pub struct ComputeGraphExecution {
     runtime: GraphRuntime,
     gpu_execution_time: Option<Duration>,
+    frame_gpu_execution_times: Vec<Option<Duration>>,
 }
 
 impl ComputeGraphExecution {
@@ -819,11 +921,16 @@ impl ComputeGraphExecution {
         self.gpu_execution_time
     }
 
+    /// Returns each frame's GPU timestamp duration, or `None` when unavailable.
+    pub fn frame_gpu_execution_times(&self) -> &[Option<Duration>] {
+        &self.frame_gpu_execution_times
+    }
+
     pub fn resource_slot(&self, name: &str) -> Option<u32> {
         self.runtime
             .resources
             .get(name)
-            .map(|resource| resource.slot)
+            .and_then(|resource| resource.slots.first().copied())
     }
 
     /// Copies an image resource to host memory as tightly packed RGBA8 pixels.
@@ -839,18 +946,26 @@ impl ComputeGraphExecution {
         self.runtime.read_buffer(name)
     }
 
-    fn write_outputs(&mut self, graph: &ComputeGraph) -> Result<(), ComputeGraphError> {
+    fn write_outputs(
+        runtime: &mut GraphRuntime,
+        graph: &ComputeGraph,
+        frame_index: usize,
+    ) -> Result<(), ComputeGraphError> {
         for (name, resource) in &graph.definition.resources {
             let Some(output) = &resource.output else {
                 continue;
             };
-            let output = graph.base_dir.join(output);
+            let output = graph.base_dir.join(
+                output
+                    .to_string_lossy()
+                    .replace("{frame}", &frame_index.to_string()),
+            );
             if let Some(parent) = output.parent() {
                 fs::create_dir_all(parent)?;
             }
             match resource.kind {
                 ResourceKind::Image => {
-                    let (width, height, pixels) = self.runtime.read_image(name)?;
+                    let (width, height, pixels) = runtime.read_image(name)?;
                     image::save_buffer_with_format(
                         &output,
                         &pixels,
@@ -861,7 +976,7 @@ impl ComputeGraphExecution {
                     )?;
                 }
                 ResourceKind::Buffer => {
-                    let bytes = self.runtime.read_buffer(name)?;
+                    let bytes = runtime.read_buffer(name)?;
                     fs::write(output, bytes)?;
                 }
             }
@@ -874,6 +989,7 @@ impl ComputeGraphExecution {
 #[derive(Clone, Copy)]
 struct ResourceTablePushConstants {
     slots: [u32; RESOURCE_TABLE_CAPACITY],
+    frame_index: u32,
 }
 
 struct GraphImage {
@@ -900,8 +1016,8 @@ enum GraphResource {
 }
 
 struct RuntimeResource {
-    slot: u32,
-    resource: GraphResource,
+    slots: Vec<u32>,
+    resources: Vec<GraphResource>,
 }
 
 struct GraphNode {
@@ -995,6 +1111,7 @@ struct GraphRuntime {
     bindless: GraphBindlessTable,
     sampler: ImmutableSamplerTable,
     resources: BTreeMap<String, RuntimeResource>,
+    current_frame: usize,
     nodes: Vec<GraphNode>,
     pipeline_layout: vk::PipelineLayout,
     command_pool: vk::CommandPool,
@@ -1078,93 +1195,103 @@ impl GraphRuntime {
         let memory_properties =
             unsafe { instance.get_physical_device_memory_properties(physical_device) };
         for (name, definition) in &graph.definition.resources {
-            let slot = graph.slots[name];
-            let resource = match definition.kind {
-                ResourceKind::Image => {
-                    let (width, height) = image_dimensions(graph, name, definition)?;
-                    let format = definition.format.unwrap_or(ImageFormat::R8G8B8A8Unorm);
-                    let image_info = vk::ImageCreateInfo::default()
-                        .image_type(vk::ImageType::TYPE_2D)
-                        .format(format.vk_format())
-                        .extent(vk::Extent3D {
+            let slots = graph.slots[name].clone();
+            let mut versions = Vec::with_capacity(slots.len());
+            for slot in slots.iter().copied() {
+                let resource = match definition.kind {
+                    ResourceKind::Image => {
+                        let (width, height) = image_dimensions(graph, name, definition)?;
+                        let format = definition.format.unwrap_or(ImageFormat::R8G8B8A8Unorm);
+                        let image_info = vk::ImageCreateInfo::default()
+                            .image_type(vk::ImageType::TYPE_2D)
+                            .format(format.vk_format())
+                            .extent(vk::Extent3D {
+                                width,
+                                height,
+                                depth: 1,
+                            })
+                            .mip_levels(1)
+                            .array_layers(1)
+                            .samples(vk::SampleCountFlags::TYPE_1)
+                            .tiling(vk::ImageTiling::OPTIMAL)
+                            .usage(
+                                vk::ImageUsageFlags::STORAGE
+                                    | vk::ImageUsageFlags::SAMPLED
+                                    | vk::ImageUsageFlags::TRANSFER_SRC
+                                    | vk::ImageUsageFlags::TRANSFER_DST,
+                            )
+                            .sharing_mode(vk::SharingMode::EXCLUSIVE)
+                            .initial_layout(vk::ImageLayout::UNDEFINED);
+                        let (image, memory) =
+                            create_graph_image(&device, &image_info, &memory_properties)?;
+                        let view_info = vk::ImageViewCreateInfo::default()
+                            .image(image)
+                            .view_type(vk::ImageViewType::TYPE_2D)
+                            .format(format.vk_format())
+                            .subresource_range(color_subresource_range());
+                        let view = unsafe { device.create_image_view(&view_info, None)? };
+                        add_graph_image(&device, &bindless, slot, view)?;
+                        GraphResource::Image(GraphImage {
+                            image,
+                            view,
+                            memory,
                             width,
                             height,
-                            depth: 1,
+                            format,
+                            layout: vk::ImageLayout::UNDEFINED,
+                            access: vk::AccessFlags::empty(),
                         })
-                        .mip_levels(1)
-                        .array_layers(1)
-                        .samples(vk::SampleCountFlags::TYPE_1)
-                        .tiling(vk::ImageTiling::OPTIMAL)
-                        .usage(
-                            vk::ImageUsageFlags::STORAGE
-                                | vk::ImageUsageFlags::SAMPLED
-                                | vk::ImageUsageFlags::TRANSFER_SRC
-                                | vk::ImageUsageFlags::TRANSFER_DST,
-                        )
-                        .sharing_mode(vk::SharingMode::EXCLUSIVE)
-                        .initial_layout(vk::ImageLayout::UNDEFINED);
-                    let (image, memory) =
-                        create_graph_image(&device, &image_info, &memory_properties)?;
-                    let view_info = vk::ImageViewCreateInfo::default()
-                        .image(image)
-                        .view_type(vk::ImageViewType::TYPE_2D)
-                        .format(format.vk_format())
-                        .subresource_range(color_subresource_range());
-                    let view = unsafe { device.create_image_view(&view_info, None)? };
-                    add_graph_image(&device, &bindless, slot, view)?;
-                    GraphResource::Image(GraphImage {
-                        image,
-                        view,
-                        memory,
-                        width,
-                        height,
-                        format,
-                        layout: vk::ImageLayout::UNDEFINED,
-                        access: vk::AccessFlags::empty(),
-                    })
-                }
-                ResourceKind::Buffer => {
-                    let size = buffer_size(graph, definition)?;
-                    let buffer_info = vk::BufferCreateInfo::default()
-                        .size(size)
-                        .usage(
-                            vk::BufferUsageFlags::STORAGE_BUFFER
-                                | vk::BufferUsageFlags::TRANSFER_SRC
-                                | vk::BufferUsageFlags::TRANSFER_DST,
-                        )
-                        .sharing_mode(vk::SharingMode::EXCLUSIVE);
-                    let buffer = unsafe { device.create_buffer(&buffer_info, None)? };
-                    let requirements = unsafe { device.get_buffer_memory_requirements(buffer) };
-                    let (memory_type, _) = find_memory_type(
-                        &memory_properties,
-                        requirements.memory_type_bits,
-                        vk::MemoryPropertyFlags::DEVICE_LOCAL,
-                        vk::MemoryPropertyFlags::empty(),
-                    )
-                    .or_else(|_| {
-                        find_memory_type(
+                    }
+                    ResourceKind::Buffer => {
+                        let size = buffer_size(graph, definition)?;
+                        let buffer_info = vk::BufferCreateInfo::default()
+                            .size(size)
+                            .usage(
+                                vk::BufferUsageFlags::STORAGE_BUFFER
+                                    | vk::BufferUsageFlags::TRANSFER_SRC
+                                    | vk::BufferUsageFlags::TRANSFER_DST,
+                            )
+                            .sharing_mode(vk::SharingMode::EXCLUSIVE);
+                        let buffer = unsafe { device.create_buffer(&buffer_info, None)? };
+                        let requirements = unsafe { device.get_buffer_memory_requirements(buffer) };
+                        let (memory_type, _) = find_memory_type(
                             &memory_properties,
                             requirements.memory_type_bits,
-                            vk::MemoryPropertyFlags::empty(),
+                            vk::MemoryPropertyFlags::DEVICE_LOCAL,
                             vk::MemoryPropertyFlags::empty(),
                         )
-                    })
-                    .map_err(|error| ComputeGraphError::Invalid(error.to_string()))?;
-                    let allocate = vk::MemoryAllocateInfo::default()
-                        .allocation_size(requirements.size)
-                        .memory_type_index(memory_type);
-                    let memory = unsafe { device.allocate_memory(&allocate, None)? };
-                    unsafe { device.bind_buffer_memory(buffer, memory, 0)? };
-                    add_graph_buffer(&device, &bindless, slot, buffer)?;
-                    GraphResource::Buffer(GraphBuffer {
-                        buffer,
-                        memory,
-                        size,
-                        access: vk::AccessFlags::empty(),
-                    })
-                }
-            };
-            resources.insert(name.clone(), RuntimeResource { slot, resource });
+                        .or_else(|_| {
+                            find_memory_type(
+                                &memory_properties,
+                                requirements.memory_type_bits,
+                                vk::MemoryPropertyFlags::empty(),
+                                vk::MemoryPropertyFlags::empty(),
+                            )
+                        })
+                        .map_err(|error| ComputeGraphError::Invalid(error.to_string()))?;
+                        let allocate = vk::MemoryAllocateInfo::default()
+                            .allocation_size(requirements.size)
+                            .memory_type_index(memory_type);
+                        let memory = unsafe { device.allocate_memory(&allocate, None)? };
+                        unsafe { device.bind_buffer_memory(buffer, memory, 0)? };
+                        add_graph_buffer(&device, &bindless, slot, buffer)?;
+                        GraphResource::Buffer(GraphBuffer {
+                            buffer,
+                            memory,
+                            size,
+                            access: vk::AccessFlags::empty(),
+                        })
+                    }
+                };
+                versions.push(resource);
+            }
+            resources.insert(
+                name.clone(),
+                RuntimeResource {
+                    slots,
+                    resources: versions,
+                },
+            );
         }
 
         let push_range = vk::PushConstantRange::default()
@@ -1260,6 +1387,7 @@ impl GraphRuntime {
             bindless,
             sampler,
             resources,
+            current_frame: 0,
             nodes,
             pipeline_layout,
             command_pool,
@@ -1355,74 +1483,76 @@ impl GraphRuntime {
             let runtime_resource = self.resources.get_mut(name).ok_or_else(|| {
                 ComputeGraphError::Invalid(format!("missing runtime resource `{name}`"))
             })?;
-            match &mut runtime_resource.resource {
-                GraphResource::Image(image) => {
-                    let barrier = vk::ImageMemoryBarrier::default()
-                        .src_access_mask(vk::AccessFlags::empty())
-                        .dst_access_mask(vk::AccessFlags::TRANSFER_WRITE)
-                        .old_layout(vk::ImageLayout::UNDEFINED)
-                        .new_layout(vk::ImageLayout::TRANSFER_DST_OPTIMAL)
-                        .image(image.image)
-                        .subresource_range(color_subresource_range());
-                    let region = vk::BufferImageCopy::default()
-                        .image_subresource(
-                            vk::ImageSubresourceLayers::default()
-                                .aspect_mask(vk::ImageAspectFlags::COLOR)
-                                .mip_level(0)
-                                .base_array_layer(0)
-                                .layer_count(1),
-                        )
-                        .image_extent(vk::Extent3D {
-                            width: image.width,
-                            height: image.height,
-                            depth: 1,
-                        });
-                    unsafe {
-                        self.device.cmd_pipeline_barrier(
-                            command,
-                            vk::PipelineStageFlags::TOP_OF_PIPE,
-                            vk::PipelineStageFlags::TRANSFER,
-                            vk::DependencyFlags::empty(),
-                            &[],
-                            &[],
-                            std::slice::from_ref(&barrier),
-                        );
-                        self.device.cmd_copy_buffer_to_image(
-                            command,
-                            buffer,
-                            image.image,
-                            vk::ImageLayout::TRANSFER_DST_OPTIMAL,
-                            std::slice::from_ref(&region),
-                        );
+            for resource in &mut runtime_resource.resources {
+                match resource {
+                    GraphResource::Image(image) => {
+                        let barrier = vk::ImageMemoryBarrier::default()
+                            .src_access_mask(vk::AccessFlags::empty())
+                            .dst_access_mask(vk::AccessFlags::TRANSFER_WRITE)
+                            .old_layout(vk::ImageLayout::UNDEFINED)
+                            .new_layout(vk::ImageLayout::TRANSFER_DST_OPTIMAL)
+                            .image(image.image)
+                            .subresource_range(color_subresource_range());
+                        let region = vk::BufferImageCopy::default()
+                            .image_subresource(
+                                vk::ImageSubresourceLayers::default()
+                                    .aspect_mask(vk::ImageAspectFlags::COLOR)
+                                    .mip_level(0)
+                                    .base_array_layer(0)
+                                    .layer_count(1),
+                            )
+                            .image_extent(vk::Extent3D {
+                                width: image.width,
+                                height: image.height,
+                                depth: 1,
+                            });
+                        unsafe {
+                            self.device.cmd_pipeline_barrier(
+                                command,
+                                vk::PipelineStageFlags::TOP_OF_PIPE,
+                                vk::PipelineStageFlags::TRANSFER,
+                                vk::DependencyFlags::empty(),
+                                &[],
+                                &[],
+                                std::slice::from_ref(&barrier),
+                            );
+                            self.device.cmd_copy_buffer_to_image(
+                                command,
+                                buffer,
+                                image.image,
+                                vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+                                std::slice::from_ref(&region),
+                            );
+                        }
+                        image.layout = vk::ImageLayout::TRANSFER_DST_OPTIMAL;
+                        image.access = vk::AccessFlags::TRANSFER_WRITE;
                     }
-                    image.layout = vk::ImageLayout::TRANSFER_DST_OPTIMAL;
-                    image.access = vk::AccessFlags::TRANSFER_WRITE;
-                }
-                GraphResource::Buffer(graph_buffer) => {
-                    let barrier = vk::BufferMemoryBarrier::default()
-                        .src_access_mask(vk::AccessFlags::empty())
-                        .dst_access_mask(vk::AccessFlags::TRANSFER_WRITE)
-                        .buffer(graph_buffer.buffer)
-                        .offset(0)
-                        .size(graph_buffer.size);
-                    unsafe {
-                        self.device.cmd_pipeline_barrier(
-                            command,
-                            vk::PipelineStageFlags::TOP_OF_PIPE,
-                            vk::PipelineStageFlags::TRANSFER,
-                            vk::DependencyFlags::empty(),
-                            &[],
-                            std::slice::from_ref(&barrier),
-                            &[],
-                        );
-                        self.device.cmd_copy_buffer(
-                            command,
-                            buffer,
-                            graph_buffer.buffer,
-                            std::slice::from_ref(&vk::BufferCopy::default().size(size)),
-                        );
+                    GraphResource::Buffer(graph_buffer) => {
+                        let barrier = vk::BufferMemoryBarrier::default()
+                            .src_access_mask(vk::AccessFlags::empty())
+                            .dst_access_mask(vk::AccessFlags::TRANSFER_WRITE)
+                            .buffer(graph_buffer.buffer)
+                            .offset(0)
+                            .size(graph_buffer.size);
+                        unsafe {
+                            self.device.cmd_pipeline_barrier(
+                                command,
+                                vk::PipelineStageFlags::TOP_OF_PIPE,
+                                vk::PipelineStageFlags::TRANSFER,
+                                vk::DependencyFlags::empty(),
+                                &[],
+                                std::slice::from_ref(&barrier),
+                                &[],
+                            );
+                            self.device.cmd_copy_buffer(
+                                command,
+                                buffer,
+                                graph_buffer.buffer,
+                                std::slice::from_ref(&vk::BufferCopy::default().size(size)),
+                            );
+                        }
+                        graph_buffer.access = vk::AccessFlags::TRANSFER_WRITE;
                     }
-                    graph_buffer.access = vk::AccessFlags::TRANSFER_WRITE;
                 }
             }
             staging.push((buffer, memory));
@@ -1436,6 +1566,8 @@ impl GraphRuntime {
                 vk::Fence::null(),
             )?;
             self.device.queue_wait_idle(self.queue)?;
+            self.device
+                .free_command_buffers(self.command_pool, std::slice::from_ref(&command));
             for (buffer, memory) in staging {
                 self.device.destroy_buffer(buffer, None);
                 self.device.free_memory(memory, None);
@@ -1444,7 +1576,15 @@ impl GraphRuntime {
         Ok(())
     }
 
-    fn execute(&mut self, graph: &ComputeGraph) -> Result<Option<Duration>, ComputeGraphError> {
+    fn execute(
+        &mut self,
+        graph: &ComputeGraph,
+        frame_index: usize,
+    ) -> Result<Option<Duration>, ComputeGraphError> {
+        self.current_frame = frame_index;
+        let shader_frame_index = u32::try_from(frame_index).map_err(|_| {
+            ComputeGraphError::Invalid("frame index exceeds the shader frame-index range".into())
+        })?;
         let allocate_info = vk::CommandBufferAllocateInfo::default()
             .command_pool(self.command_pool)
             .level(vk::CommandBufferLevel::PRIMARY)
@@ -1481,7 +1621,7 @@ impl GraphRuntime {
                     ComputeGraphError::Invalid("compute graph contains a dependency cycle".into())
                 })?;
             let node = &graph.definition.nodes[node_index];
-            self.record_barriers(command_buffer, node)?;
+            self.record_barriers(command_buffer, node, frame_index)?;
             unsafe {
                 self.device.cmd_bind_pipeline(
                     command_buffer,
@@ -1498,6 +1638,7 @@ impl GraphRuntime {
                 );
                 let mut table = ResourceTablePushConstants {
                     slots: [0; RESOURCE_TABLE_CAPACITY],
+                    frame_index: shader_frame_index,
                 };
                 if node.bindings.len() > RESOURCE_TABLE_CAPACITY {
                     return Err(ComputeGraphError::Invalid(format!(
@@ -1506,7 +1647,10 @@ impl GraphRuntime {
                     )));
                 }
                 for (index, binding) in node.bindings.iter().enumerate() {
-                    table.slots[index] = self.resources[&binding.resource].slot;
+                    let resource = &self.resources[&binding.resource];
+                    let resource_index =
+                        history_index(frame_index, binding.frame_offset, resource.slots.len())?;
+                    table.slots[index] = resource.slots[resource_index];
                 }
                 let bytes = std::slice::from_raw_parts(
                     (&table as *const ResourceTablePushConstants).cast::<u8>(),
@@ -1550,7 +1694,12 @@ impl GraphRuntime {
             )?;
             self.device.queue_wait_idle(self.queue)?;
         }
-        self.read_timestamps()
+        let elapsed = self.read_timestamps()?;
+        unsafe {
+            self.device
+                .free_command_buffers(self.command_pool, std::slice::from_ref(&command_buffer));
+        }
+        Ok(elapsed)
     }
 
     fn read_timestamps(&self) -> Result<Option<Duration>, ComputeGraphError> {
@@ -1581,6 +1730,7 @@ impl GraphRuntime {
         &mut self,
         command_buffer: vk::CommandBuffer,
         node: &ComputeNodeDefinition,
+        frame_index: usize,
     ) -> Result<(), ComputeGraphError> {
         let mut image_barriers = Vec::new();
         let mut buffer_barriers = Vec::new();
@@ -1591,7 +1741,12 @@ impl GraphRuntime {
                     binding.resource
                 ))
             })?;
-            match &mut runtime_resource.resource {
+            let resource_index = history_index(
+                frame_index,
+                binding.frame_offset,
+                runtime_resource.resources.len(),
+            )?;
+            match &mut runtime_resource.resources[resource_index] {
                 GraphResource::Image(image) => {
                     let new_layout = if binding.access.writes() {
                         vk::ImageLayout::GENERAL
@@ -1671,7 +1826,8 @@ impl GraphRuntime {
         let runtime_resource = self.resources.get_mut(name).ok_or_else(|| {
             ComputeGraphError::Invalid(format!("unknown graph resource `{name}`"))
         })?;
-        let GraphResource::Image(image) = &mut runtime_resource.resource else {
+        let current_index = self.current_frame % runtime_resource.resources.len();
+        let GraphResource::Image(image) = &mut runtime_resource.resources[current_index] else {
             return Err(ComputeGraphError::Invalid(format!(
                 "resource `{name}` is not an image"
             )));
@@ -1767,6 +1923,8 @@ impl GraphRuntime {
                 vk::Fence::null(),
             )?;
             self.device.queue_wait_idle(self.queue)?;
+            self.device
+                .free_command_buffers(self.command_pool, std::slice::from_ref(&command));
         }
         image.layout = vk::ImageLayout::TRANSFER_SRC_OPTIMAL;
         image.access = vk::AccessFlags::TRANSFER_READ;
@@ -1800,7 +1958,8 @@ impl GraphRuntime {
         let runtime_resource = self.resources.get_mut(name).ok_or_else(|| {
             ComputeGraphError::Invalid(format!("unknown graph resource `{name}`"))
         })?;
-        let GraphResource::Buffer(buffer) = &mut runtime_resource.resource else {
+        let current_index = self.current_frame % runtime_resource.resources.len();
+        let GraphResource::Buffer(buffer) = &mut runtime_resource.resources[current_index] else {
             return Err(ComputeGraphError::Invalid(format!(
                 "resource `{name}` is not a buffer"
             )));
@@ -1879,6 +2038,8 @@ impl GraphRuntime {
                 vk::Fence::null(),
             )?;
             self.device.queue_wait_idle(self.queue)?;
+            self.device
+                .free_command_buffers(self.command_pool, std::slice::from_ref(&command));
         }
         buffer.access = vk::AccessFlags::TRANSFER_READ;
         let mapped = unsafe {
@@ -1922,15 +2083,17 @@ impl Drop for GraphRuntime {
                 self.device.destroy_query_pool(query_pool, None);
             }
             for runtime_resource in self.resources.values() {
-                match &runtime_resource.resource {
-                    GraphResource::Image(image) => {
-                        self.device.destroy_image_view(image.view, None);
-                        self.device.destroy_image(image.image, None);
-                        self.device.free_memory(image.memory, None);
-                    }
-                    GraphResource::Buffer(buffer) => {
-                        self.device.destroy_buffer(buffer.buffer, None);
-                        self.device.free_memory(buffer.memory, None);
+                for resource in &runtime_resource.resources {
+                    match resource {
+                        GraphResource::Image(image) => {
+                            self.device.destroy_image_view(image.view, None);
+                            self.device.destroy_image(image.image, None);
+                            self.device.free_memory(image.memory, None);
+                        }
+                        GraphResource::Buffer(buffer) => {
+                            self.device.destroy_buffer(buffer.buffer, None);
+                            self.device.free_memory(buffer.memory, None);
+                        }
                     }
                 }
             }
@@ -1954,6 +2117,24 @@ fn access_flags(access: AccessType) -> vk::AccessFlags {
         (true, true) => vk::AccessFlags::SHADER_READ | vk::AccessFlags::SHADER_WRITE,
         (false, false) => vk::AccessFlags::empty(),
     }
+}
+
+fn history_index(
+    frame_index: usize,
+    frame_offset: i32,
+    history_length: usize,
+) -> Result<usize, ComputeGraphError> {
+    let frame_index = i64::try_from(frame_index).map_err(|_| {
+        ComputeGraphError::Invalid("frame index exceeds the resource history range".into())
+    })?;
+    let history_length = i64::try_from(history_length)
+        .map_err(|_| ComputeGraphError::Invalid("resource history is too large".into()))?;
+    if history_length == 0 {
+        return Err(ComputeGraphError::Invalid(
+            "resource history must be non-zero".into(),
+        ));
+    }
+    Ok((frame_index + i64::from(frame_offset)).rem_euclid(history_length) as usize)
 }
 
 fn image_dimensions(

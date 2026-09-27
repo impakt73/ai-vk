@@ -20,13 +20,21 @@ available through the active Vulkan SDK environment.
 ## Compute Graphs
 
 `ComputeGraph::from_toml` loads a graph whose resources are allocated once and
-kept in persistent bindless slots for the lifetime of the execution. Shader
-paths in `ComputeGraph::from_toml_file` are relative to the TOML file.
+kept in persistent bindless slots for the lifetime of the execution. Use
+`--frames N` or `ComputeGraph::execute_frames(N)` to execute the graph repeatedly
+while retaining its GPU resources between frames. Shader paths in
+`ComputeGraph::from_toml_file` are relative to the TOML file.
 
 The CLI can execute an externally authored graph without any Rust code changes:
 
 ```text
 cargo run -- run-graph examples/compute_graph.toml
+```
+
+Execute a graph four times with the same resources:
+
+```text
+cargo run -- run-graph examples/compute_graph.toml --frames 4
 ```
 
 Validation is optional for the CLI. Add `--validation-layers` before the
@@ -91,11 +99,11 @@ The checked-in graph and shaders are also exercised by
 `ComputeGraph` API. That keeps the example reusable from the CLI while the
 integration test verifies the color, normal, motion, and depth results.
 
-After execution, the CLI reports the GPU timestamp duration for the graph. For
-example:
+After execution, the CLI reports the total GPU timestamp duration for all
+frames and, for multi-frame runs, each frame's duration. For example:
 
 ```text
-executed compute graph examples/compute_graph.toml (2 nodes, 2 resources)
+executed compute graph examples/compute_graph.toml (2 nodes, 2 resources, 1 frame)
 GPU execution time: 1.37 ms
 ```
 
@@ -105,7 +113,10 @@ report `GPU execution time: unavailable`.
 
 Resources can declare an output path. Paths are relative to the graph TOML file;
 images are written as PNG files and buffers are written as raw binary after all
-graph dispatches have completed:
+dispatches for that frame have completed. In a multi-frame graph, include `{frame}` in
+every declared output path to write a separate zero-based output for each frame.
+For a one-frame run, `{frame}` is replaced with `0` if present; paths without it
+keep their existing behavior.
 
 ```toml
 [resources.image]
@@ -118,6 +129,9 @@ type = "buffer"
 size = 1024
 output = "result.bin"
 ```
+
+For example, `output = "frames/result-{frame}.png"` writes
+`frames/result-0.png`, `frames/result-1.png`, and so on.
 
 Resources can also declare an input path. Input paths are relative to the graph
 TOML file. Buffer inputs are copied as raw bytes and their size is taken from
@@ -139,6 +153,8 @@ Do not specify `width`, `height`, `extent`, or `size` for resources with an
 input. Those values are derived from the input file and explicit values are
 rejected.
 
+Nodes can produce a resource and consume it in a dependent dispatch:
+
 ```toml
 [resources.source]
 type = "image"
@@ -157,6 +173,51 @@ bindings = [{ resource = "source", access = "write" }]
 ```
 
 Graph shaders should include `shaders/compute_graph.hlsl`. Each dispatch gets a
-64-byte push-constant table containing `compute_graph.slots[]`. A slot indexes
-`bindless_images[]` or `bindless_buffers[]` depending on the resource type.
-Image sampling is available through `bindless_textures[]` from the same include.
+68-byte push-constant table containing `compute_graph.slots[]` and the current
+`compute_graph.frame_index`. A slot indexes `bindless_images[]` or
+`bindless_buffers[]` depending on the resource type. Image sampling is available
+through `bindless_textures[]` from the same include.
+
+### Temporal resources
+
+Resources can retain multiple physical versions for temporal filters. Set
+`history` to the number of versions to rotate through, then select a version on
+each binding with `frame_offset`: `0` is the current frame and `-1` is the
+previous frame. Historical versions are read-only; the executor orders frames
+sequentially and inserts barriers between their uses. A history of two is
+enough for the common previous-frame feedback pattern:
+
+```toml
+[resources.accumulation]
+type = "image"
+extent = [8, 8]
+format = "rgba32_float"
+history = 2
+output = "frames/accumulation-{frame}.png"
+
+[[nodes]]
+name = "accumulate"
+shader = "temporal_accumulation.hlsl"
+kernel = "main"
+dispatch = [1, 1, 1]
+bindings = [
+    { resource = "accumulation", frame_offset = -1, access = "read" },
+    { resource = "accumulation", frame_offset = 0, access = "write" },
+]
+```
+
+History slots are undefined at the start unless initialized by a resource `input`
+(inputs are copied into every slot). Graphs without an input can use
+`compute_graph.frame_index` to seed the current version on frame zero before
+reading previous-frame contents on later frames.
+
+Run the dedicated example for four frames:
+
+```text
+cargo run -- run-graph examples/temporal/temporal_accumulation.toml --frames 4
+```
+
+It accumulates a quarter-step into each RGB channel per frame, starting from
+black on frame zero, and writes one PNG per frame. The same graph and shader are
+exercised by `tests/temporal_graph.rs`, which checks the intermediate images and
+the final accumulated texture.

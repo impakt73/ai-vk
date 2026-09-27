@@ -8,6 +8,7 @@ SamplerState bindless_sampler : register(s0, space0);
 struct ComputeGraphPushConstants
 {
     uint slots[16];
+    uint frame_index;
 };
 
 [[vk::push_constant]]

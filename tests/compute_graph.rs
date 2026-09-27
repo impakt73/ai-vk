@@ -65,6 +65,101 @@ fn parses_resources_nodes_and_resource_hazards_from_toml() {
 }
 
 #[test]
+fn validates_frame_relative_resource_bindings() {
+    let graph = ComputeGraph::from_toml(
+        r#"
+            [resources.history]
+            type = "image"
+            extent = [8, 8]
+            history = 2
+
+            [[nodes]]
+            name = "temporal"
+            shader = "temporal.hlsl"
+            kernel = "main"
+            dispatch = [1, 1, 1]
+            bindings = [
+                { resource = "history", frame_offset = -1, access = "read" },
+                { resource = "history", frame_offset = 0, access = "write" },
+            ]
+        "#,
+    )
+    .expect("distinct temporal versions should be valid bindings");
+    assert_eq!(graph.dependencies(0), Some([].as_slice()));
+
+    let insufficient_history = ComputeGraph::from_toml(
+        r#"
+            [resources.history]
+            type = "image"
+            extent = [8, 8]
+
+            [[nodes]]
+            name = "temporal"
+            shader = "temporal.hlsl"
+            kernel = "main"
+            dispatch = [1, 1, 1]
+            bindings = [{ resource = "history", frame_offset = -1, access = "read" }]
+        "#,
+    )
+    .expect_err("historical reads should require a retained resource version");
+    assert!(
+        insufficient_history
+            .to_string()
+            .contains("requires history of at least 2")
+    );
+
+    let historical_write = ComputeGraph::from_toml(
+        r#"
+            [resources.history]
+            type = "image"
+            extent = [8, 8]
+            history = 2
+
+            [[nodes]]
+            name = "bad-temporal"
+            shader = "temporal.hlsl"
+            kernel = "main"
+            dispatch = [1, 1, 1]
+            bindings = [{ resource = "history", frame_offset = -1, access = "write" }]
+        "#,
+    )
+    .expect_err("historical resource versions should be read-only");
+    assert!(
+        historical_write
+            .to_string()
+            .contains("may not write historical frame")
+    );
+}
+
+#[test]
+fn validates_multi_frame_output_paths_and_frame_counts() {
+    let graph = ComputeGraph::from_toml(
+        r#"
+            [resources.output]
+            type = "image"
+            extent = [2, 2]
+            output = "result.png"
+        "#,
+    )
+    .expect("graph with output should parse");
+    let output_path = graph
+        .execute_frames(2)
+        .err()
+        .expect("multi-frame output paths must distinguish frames");
+    assert!(output_path.to_string().contains("must contain `{frame}`"));
+
+    let zero_frames = graph
+        .execute_frames(0)
+        .err()
+        .expect("zero-frame executions should be rejected");
+    assert!(
+        zero_frames
+            .to_string()
+            .contains("frame count must be non-zero")
+    );
+}
+
+#[test]
 fn rejects_unknown_resources_and_invalid_dimensions() {
     let unknown = ComputeGraph::from_toml(
         r#"

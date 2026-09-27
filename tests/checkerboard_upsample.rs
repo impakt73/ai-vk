@@ -63,10 +63,7 @@ fn generates_a_checkerboard_and_bilinearly_upsamples_it() {
         .expect("upsampled output should be readable");
     assert_eq!((width, height), (OUTPUT_SIZE, OUTPUT_SIZE));
     assert_eq!(&pixels[..4], &[0, 0, 0, 255]);
-    assert_eq!(
-        &pixels[((0 * OUTPUT_SIZE + 7) * 4) as usize..][..4],
-        &[64, 64, 64, 255]
-    );
+    assert_eq!(&pixels[(7 * 4) as usize..][..4], &[64, 64, 64, 255]);
     assert_eq!(
         &pixels[((7 * OUTPUT_SIZE + 7) * 4) as usize..][..4],
         &[96, 96, 96, 255]
