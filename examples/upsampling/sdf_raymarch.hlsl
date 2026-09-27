@@ -1,8 +1,5 @@
 #include "../../shaders/compute_graph.hlsl"
 
-static const float frame_delta = 1.0 / 15.0;
-static const float current_time = 1.35;
-static const float previous_time = current_time - frame_delta;
 static const float far_plane = 16.0;
 static const float sphere_radius = 0.82;
 static const float motion_display_scale = 24.0;
@@ -135,9 +132,11 @@ float3 phong(float3 position, float3 normal, float3 ray_direction, int material)
 [numthreads(8, 8, 1)]
 void main(uint3 dispatch_thread_id : SV_DispatchThreadID)
 {
+    float current_time = asfloat(bindless_buffers[compute_graph.slots[0]][0]);
+    float previous_time = asfloat(bindless_buffers[compute_graph.slots[0]][1]);
     uint width;
     uint height;
-    bindless_images[compute_graph.slots[0]].GetDimensions(width, height);
+    bindless_images[compute_graph.slots[1]].GetDimensions(width, height);
     if (dispatch_thread_id.x >= width || dispatch_thread_id.y >= height)
     {
         return;
@@ -182,8 +181,8 @@ void main(uint3 dispatch_thread_id : SV_DispatchThreadID)
     float depth_encoded = saturate(depth / far_plane);
     float2 motion_encoded = saturate(motion * motion_display_scale + 0.5);
 
-    bindless_images[compute_graph.slots[0]][dispatch_thread_id.xy] = float4(color, 1.0);
-    bindless_images[compute_graph.slots[1]][dispatch_thread_id.xy] = float4(normal * 0.5 + 0.5, 1.0);
-    bindless_images[compute_graph.slots[2]][dispatch_thread_id.xy] = float4(motion_encoded, 0.0, 1.0);
-    bindless_images[compute_graph.slots[3]][dispatch_thread_id.xy] = float4(depth_encoded.xxx, 1.0);
+    bindless_images[compute_graph.slots[1]][dispatch_thread_id.xy] = float4(color, 1.0);
+    bindless_images[compute_graph.slots[2]][dispatch_thread_id.xy] = float4(normal * 0.5 + 0.5, 1.0);
+    bindless_images[compute_graph.slots[3]][dispatch_thread_id.xy] = float4(motion_encoded, 0.0, 1.0);
+    bindless_images[compute_graph.slots[4]][dispatch_thread_id.xy] = float4(depth_encoded.xxx, 1.0);
 }

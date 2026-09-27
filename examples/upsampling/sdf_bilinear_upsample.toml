@@ -26,6 +26,10 @@ extent = ["$source_width", "$source_height"]
 type = "image"
 extent = ["$source_width", "$source_height"]
 
+[resources.time]
+type = "buffer"
+input = "time.bin"
+
 [resources.output]
 type = "image"
 extent = ["$output_width", "$output_height"]
@@ -52,6 +56,7 @@ shader = "sdf_raymarch.hlsl"
 kernel = "main"
 dispatch = ["$div_align($source_width, 8)", "$div_align($source_height, 8)", 1]
 bindings = [
+    { resource = "time", access = "read" },
     { resource = "source", access = "write" },
     { resource = "source_normal", access = "write" },
     { resource = "source_motion", access = "write" },
