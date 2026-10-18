@@ -1,0 +1,14 @@
+# Run from the repository root with:
+# cargo run -- run-graph examples/gpuworker.toml
+
+[resources.output]
+type = "buffer"
+size = 1024 # 256 uint values
+output = "gpuworker_output.bin"
+
+[[nodes]]
+name = "clear-output"
+shader = "shaders/gpuworker.hlsl"
+kernel = "main"
+dispatch = [4, 1, 1]
+bindings = [{ resource = "output", access = "write" }]
