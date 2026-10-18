@@ -107,6 +107,21 @@ integration test verifies the first-frame color, normal, motion, and depth
 results, then compares the second-frame temporal validity output against a gold
 image and checks its binary red/green values.
 
+A compute-based triangle rasterizer lives in `examples/rasterization/`. Its
+input is a raw buffer containing a triangle count followed by normalized
+positions and colors, and each compute thread rasterizes one output pixel by
+looping over every triangle in that buffer:
+
+```text
+cargo run -- run-graph examples/rasterization/triangle_rasterize.toml
+```
+
+The default `triangle.bin` contains a single triangle at 128x128 resolution.
+Override the output extent with `--arg width=... --arg height=...`.
+`tests/triangle_rasterize.rs` executes the same graph through the public
+`ComputeGraph` API, checks the covered and background pixels, and compares the
+rendered image against `tests/gold/triangle_rasterized.png`.
+
 After execution, the CLI reports the total GPU timestamp duration for all
 frames and, for multi-frame runs, each frame's duration. For example:
 
